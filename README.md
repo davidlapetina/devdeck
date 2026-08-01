@@ -32,7 +32,7 @@ Interactive Git tab running `lazygit` inside DevDeck:
 - Configuration reload without killing running sessions
 - Help, rename, confirmation, and prompt overlays
 
-Claude Code, Codex, shells, test runners, Git tools, and editors are all just configured commands. DevDeck does not hardcode special behavior for any of them.
+Claude Code, Codex, shells, Git tools, and editors are all just configured commands. DevDeck does not hardcode special behavior for any of them.
 
 ## Install From Source
 
@@ -106,12 +106,6 @@ auto_start = false
 name = "Shell"
 command = "${SHELL}"
 auto_start = true
-
-[[tabs]]
-name = "Tests"
-command = "cargo"
-args = ["test"]
-auto_start = false
 
 [[tabs]]
 name = "Git"

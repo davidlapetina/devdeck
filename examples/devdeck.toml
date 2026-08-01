@@ -38,12 +38,6 @@ command = "${SHELL}"
 auto_start = true
 
 [[tabs]]
-name = "Tests"
-command = "cargo"
-args = ["test"]
-auto_start = false
-
-[[tabs]]
 name = "Git"
 command = "lazygit"
 auto_start = false
