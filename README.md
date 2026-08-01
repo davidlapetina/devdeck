@@ -4,6 +4,16 @@ DevDeck is a terminal workspace for repository browsing and command-line develop
 
 DevDeck runs inside your terminal emulator. It is not a terminal multiplexer, shell replacement, or editor.
 
+## Screenshots
+
+Repository browser with file tree and preview:
+
+![DevDeck Files tab showing the repository browser and preview pane](docs/assets/devdeck-files-tab.png)
+
+Interactive Git tab running `lazygit` inside DevDeck:
+
+![DevDeck Git tab running lazygit in a PTY-backed terminal session](docs/assets/devdeck-git-tab.png)
+
 ## Features
 
 - Repository tree navigation with hidden-file toggle and generated-directory filtering
