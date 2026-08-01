@@ -1,0 +1,26 @@
+/target/
+
+# Rust backup files sometimes produced by rustfmt.
+**/*.rs.bk
+
+# Local environment files.
+.env
+.env.*
+!.env.example
+
+# OS metadata.
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# Editor and IDE local state.
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local agent/session memory.
+AGENTS.md

@@ -1,0 +1,30 @@
+version = 1
+
+[workspace]
+default_tab = "Files"
+
+[[tabs]]
+name = "Claude"
+command = "claude"
+auto_start = false
+
+[[tabs]]
+name = "Codex"
+command = "codex"
+auto_start = false
+
+[[tabs]]
+name = "Shell"
+command = "${SHELL}"
+auto_start = false
+
+[[tabs]]
+name = "Tests"
+command = "cargo"
+args = ["test"]
+auto_start = false
+
+[[tabs]]
+name = "Git"
+command = "lazygit"
+auto_start = false

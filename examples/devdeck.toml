@@ -1,0 +1,49 @@
+# Copy this to ~/.config/devdeck/config.toml or to a repository as .devdeck.toml.
+#
+# External editor shortcut:
+#   DevDeck's `e` command uses the EDITOR environment variable.
+#   To use Vim externally, start DevDeck with:
+#     EDITOR=vim devdeck .
+#   or add this to your shell profile:
+#     export EDITOR=vim
+#
+# In-DevDeck editor tabs:
+#   DevDeck's `v` command resolves VISUAL, then EDITOR, then vi.
+#   To prefer Vim for editor tabs:
+#     export VISUAL=vim
+
+version = 1
+
+[workspace]
+default_tab = "Files"
+
+[[tabs]]
+name = "Claude"
+command = "claude"
+auto_start = false
+
+[[tabs]]
+name = "Codex"
+command = "codex"
+auto_start = false
+
+[[tabs]]
+name = "Shell"
+command = "${SHELL}"
+auto_start = true
+
+[[tabs]]
+name = "Tests"
+command = "cargo"
+args = ["test"]
+auto_start = false
+
+[[tabs]]
+name = "Git"
+command = "lazygit"
+auto_start = false
+
+[[tabs]]
+name = "Vim"
+command = "vim"
+auto_start = false
