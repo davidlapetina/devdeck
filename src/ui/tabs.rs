@@ -46,7 +46,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         spans.push(Span::styled(label, style));
     }
     spans.push(Span::styled(
-        "[+ Ctrl-b c]",
+        "[+ c/Ctrl-b c]",
         Style::default().fg(Color::DarkGray),
     ));
 

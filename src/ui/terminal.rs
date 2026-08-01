@@ -18,7 +18,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
 
     match &terminal_tab.state {
-        TerminalTabState::Running | TerminalTabState::Exited { .. } => {
+        TerminalTabState::Running => {
             if let Some(session_id) = terminal_tab.session_id {
                 if let Some(session) = app.sessions.session(session_id) {
                     let pseudo_terminal = PseudoTerminal::new(session.terminal.screen())
@@ -35,18 +35,37 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 frame,
                 area,
                 block,
-                "Session not started\n\nPress Enter to start",
+                "Session not started\n\nPress Enter to start\n1..9 switch tabs | Tab next | ? help",
             );
         }
         TerminalTabState::Starting => {
             render_message(frame, area, block, "Starting...");
+        }
+        TerminalTabState::Exited { exit_code } => {
+            let state = match exit_code {
+                Some(code) => format!("Session exited {code}"),
+                None => "Session exited".to_string(),
+            };
+            let close_help = if tab.temporary {
+                "x close temporary tab"
+            } else {
+                "x reset to not started"
+            };
+            render_message(
+                frame,
+                area,
+                block,
+                &format!("{state}\n\nPress Enter or r to restart\n{close_help}\n1..9 switch tabs | Tab next | ? help"),
+            );
         }
         TerminalTabState::Failed { message } => {
             render_message(
                 frame,
                 area,
                 block,
-                &format!("Unable to start session\n\n{message}"),
+                &format!(
+                    "Unable to start session\n\n{message}\n\nPress Enter or r to retry\n1..9 switch tabs | Tab next | ? help"
+                ),
             );
         }
     }

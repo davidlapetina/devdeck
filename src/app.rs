@@ -43,6 +43,7 @@ pub enum InputMode {
     RenameTab,
     ConfirmStop,
     ConfirmRestart,
+    ConfirmQuit,
     Help,
     PromptOverlay,
 }
@@ -235,6 +236,10 @@ impl App {
                 self.handle_confirm_restart_key(event, event_tx);
                 return None;
             }
+            InputMode::ConfirmQuit => {
+                self.handle_confirm_quit_key(event);
+                return None;
+            }
             InputMode::Help => {
                 if matches!(
                     event.code,
@@ -254,7 +259,7 @@ impl App {
         if is_ctrl_b(event) {
             self.input_mode = InputMode::CommandPrefix;
             self.set_status(
-                "COMMAND | 1..9 tab | n/p tab | c new | x stop | r restart | e reload | ? help",
+                "COMMAND | 1..9 tab | n/p tab | c new | x stop | r restart | e reload | q quit | ? help",
             );
             return None;
         }
@@ -454,6 +459,10 @@ impl App {
             return None;
         }
 
+        if self.handle_direct_app_key(event, event_tx) {
+            return None;
+        }
+
         let Some(action) = map_key(event) else {
             return None;
         };
@@ -471,7 +480,7 @@ impl App {
             }
             KeyAction::Root => self.go_root(),
             KeyAction::ToggleHidden => self.toggle_hidden(),
-            KeyAction::Quit | KeyAction::CtrlC => self.should_quit = true,
+            KeyAction::Quit | KeyAction::CtrlC => self.request_quit_confirmation(),
             KeyAction::ToggleMarkdown => self.toggle_markdown(),
             KeyAction::PreviewPageDown => self.preview.scroll_page_down(),
             KeyAction::PreviewPageUp => self.preview.scroll_page_up(),
@@ -496,21 +505,41 @@ impl App {
     }
 
     fn handle_terminal_key(&mut self, event: KeyEvent, event_tx: &EventSender) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(terminal) = self.tabs.get(self.active_tab).and_then(Tab::as_terminal) else {
             return;
         };
-        let Some(terminal) = tab.as_terminal() else {
-            return;
-        };
+        let state = terminal.state.clone();
+        let session_id = terminal.session_id;
 
-        match terminal.state {
+        match state {
             TerminalTabState::NotStarted => {
                 if matches!(event.code, KeyCode::Enter) {
                     self.start_terminal_tab(self.active_tab, event_tx);
+                } else {
+                    self.handle_direct_app_key(event, event_tx);
                 }
             }
+            TerminalTabState::Exited { .. } | TerminalTabState::Failed { .. } => match event {
+                KeyEvent {
+                    code: KeyCode::Enter,
+                    ..
+                }
+                | KeyEvent {
+                    code: KeyCode::Char('r'),
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => self.perform_restart(self.active_tab, event_tx),
+                KeyEvent {
+                    code: KeyCode::Char('x'),
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => self.perform_stop_or_close(self.active_tab),
+                _ => {
+                    self.handle_direct_app_key(event, event_tx);
+                }
+            },
             TerminalTabState::Running => {
-                if let Some(session_id) = terminal.session_id {
+                if let Some(session_id) = session_id {
                     if let Some(bytes) = key_event_to_bytes(event) {
                         if let Err(error) = self.sessions.write(session_id, &bytes) {
                             self.set_status(format!("Unable to write to terminal: {error}"));
@@ -518,9 +547,7 @@ impl App {
                     }
                 }
             }
-            TerminalTabState::Starting
-            | TerminalTabState::Exited { .. }
-            | TerminalTabState::Failed { .. } => {}
+            TerminalTabState::Starting => {}
         }
     }
 
@@ -593,6 +620,13 @@ impl App {
             } => {
                 self.confirm_tab = None;
                 self.input_mode = InputMode::Help;
+            }
+            KeyEvent {
+                code: KeyCode::Char('q'),
+                ..
+            } => {
+                self.confirm_tab = None;
+                self.request_quit_confirmation();
             }
             KeyEvent {
                 code: KeyCode::Char(','),
@@ -769,6 +803,106 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_confirm_quit_key(&mut self, event: KeyEvent) {
+        match event {
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('y'),
+                ..
+            } => {
+                self.should_quit = true;
+            }
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('n'),
+                ..
+            } => {
+                self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+                self.set_status("Quit cancelled");
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_direct_app_key(&mut self, event: KeyEvent, event_tx: &EventSender) -> bool {
+        match event {
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            } => {
+                self.select_next_tab(event_tx);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::BackTab,
+                ..
+            } => {
+                self.select_previous_tab(event_tx);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+                ..
+            } if ('1'..='9').contains(&ch) => {
+                let index = ch as usize - '1' as usize;
+                self.select_tab(index, event_tx);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('n'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.select_next_tab(event_tx);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('p'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.select_previous_tab(event_tx);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.open_tab_launcher();
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('?'),
+                modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+                ..
+            } => {
+                self.input_mode = InputMode::Help;
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('q'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.request_quit_confirmation();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn request_quit_confirmation(&mut self) {
+        self.confirm_tab = None;
+        self.input_mode = InputMode::ConfirmQuit;
+        self.set_status("Quit DevDeck? Enter/y confirm, Esc/n cancel");
     }
 
     fn select_tab(&mut self, index: usize, event_tx: &EventSender) {
@@ -1078,18 +1212,27 @@ impl App {
     }
 
     fn start_terminal_tab(&mut self, index: usize, event_tx: &EventSender) {
-        let Some(tab) = self.tabs.get(index) else {
+        let Some((old_session_id, title, profile)) = self.tabs.get(index).and_then(|tab| {
+            let terminal = tab.as_terminal()?;
+            if terminal.state.is_running() {
+                return None;
+            }
+            Some((
+                terminal.session_id,
+                tab.title.clone(),
+                terminal.profile.clone(),
+            ))
+        }) else {
             return;
         };
-        let Some(terminal) = tab.as_terminal() else {
-            return;
-        };
-        if terminal.state.is_running() || terminal.session_id.is_some() {
-            return;
+
+        if let Some(session_id) = old_session_id {
+            self.sessions.remove(session_id);
+            if let Some(terminal) = self.tabs[index].terminal_mut() {
+                terminal.session_id = None;
+            }
         }
 
-        let title = tab.title.clone();
-        let profile = terminal.profile.clone();
         if let Some(terminal) = self.tabs[index].terminal_mut() {
             terminal.state = TerminalTabState::Starting;
         }
@@ -1704,6 +1847,61 @@ mod tests {
     }
 
     #[test]
+    fn q_requires_confirmation_before_quitting() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &tx);
+
+        assert_eq!(app.input_mode, InputMode::ConfirmQuit);
+        assert!(!app.should_quit);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE), &tx);
+
+        assert_eq!(app.input_mode, InputMode::Repository);
+        assert!(!app.should_quit);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &tx);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn files_tab_direct_number_key_selects_configured_tab() {
+        let temp = TempDir::new().unwrap();
+        let mut app = App::new(
+            temp.path().to_path_buf(),
+            false,
+            false,
+            ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![TerminalProfile {
+                    name: "Claude".to_string(),
+                    command: "devdeck-missing-command-for-test".to_string(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: HashMap::new(),
+                    auto_start: false,
+                    restart_on_exit: false,
+                }],
+            },
+        )
+        .unwrap();
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE), &tx);
+
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.input_mode, InputMode::Terminal);
+        assert!(matches!(
+            app.tabs[1].as_terminal().unwrap().state,
+            TerminalTabState::Failed { .. }
+        ));
+    }
+
+    #[test]
     fn unique_temporary_titles_get_numeric_suffixes() {
         let temp = TempDir::new().unwrap();
         let mut app = app(&temp);
@@ -1801,6 +1999,41 @@ mod tests {
 
         assert_eq!(app.tabs[1].title, "Renamed");
         assert_eq!(app.tabs[1].as_terminal().unwrap().profile.name, "Renamed");
+    }
+
+    #[test]
+    fn exited_terminal_enter_retries_after_stale_session_id() {
+        let temp = TempDir::new().unwrap();
+        let mut app = App::new(
+            temp.path().to_path_buf(),
+            false,
+            false,
+            ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![TerminalProfile {
+                    name: "Codex".to_string(),
+                    command: "devdeck-missing-command-for-test".to_string(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: HashMap::new(),
+                    auto_start: false,
+                    restart_on_exit: false,
+                }],
+            },
+        )
+        .unwrap();
+        app.active_tab = 1;
+        app.input_mode = InputMode::Terminal;
+        let terminal = app.tabs[1].terminal_mut().unwrap();
+        terminal.state = TerminalTabState::Exited { exit_code: Some(0) };
+        terminal.session_id = Some(SessionId(42));
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+
+        let terminal = app.tabs[1].as_terminal().unwrap();
+        assert!(terminal.session_id.is_none());
+        assert!(matches!(terminal.state, TerminalTabState::Failed { .. }));
     }
 
     #[test]

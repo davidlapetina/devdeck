@@ -43,6 +43,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         InputMode::ConfirmRestart => {
             render_confirm(frame, "Restart terminal?", "Enter/y restart | Esc/n cancel")
         }
+        InputMode::ConfirmQuit => {
+            render_confirm(frame, "Quit DevDeck?", "Enter/y quit | Esc/n cancel")
+        }
         InputMode::Help => render_help(frame),
         InputMode::PromptOverlay => render_prompt(frame, app),
         InputMode::Repository | InputMode::Terminal | InputMode::CommandPrefix => {}
@@ -189,6 +192,14 @@ fn render_help(frame: &mut Frame<'_>) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let text = vec![
+        Line::from("Files and inactive terminal tabs"),
+        Line::from("1..9          Select tab by number"),
+        Line::from("Tab/BackTab   Next/previous tab"),
+        Line::from("c             New temporary command tab"),
+        Line::from("?             Help"),
+        Line::from("q             Quit with confirmation"),
+        Line::from(""),
+        Line::from("Terminal command prefix, used while a process is running"),
         Line::from("Ctrl-b 1..9   Select tab"),
         Line::from("Ctrl-b n/p    Next/previous tab"),
         Line::from("Ctrl-b f      Files tab"),
@@ -196,6 +207,7 @@ fn render_help(frame: &mut Frame<'_>) {
         Line::from("Ctrl-b x      Stop or close current terminal tab"),
         Line::from("Ctrl-b r      Restart current terminal tab"),
         Line::from("Ctrl-b e      Reload configuration"),
+        Line::from("Ctrl-b q      Quit with confirmation"),
         Line::from("Ctrl-b ,      Rename temporary tab"),
         Line::from("Ctrl-b ?      Help"),
         Line::from("Ctrl-b Ctrl-b Send literal Ctrl-b"),

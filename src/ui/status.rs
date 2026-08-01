@@ -16,7 +16,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     if app.input_mode == InputMode::CommandPrefix {
         let paragraph = Paragraph::new(
-            "COMMAND | 1..9 tab | n/p tab | c new | x stop | r restart | e reload | ? help",
+            "COMMAND | 1..9 tab | n/p tab | c new | x stop | r restart | e reload | q quit | ? help",
         )
         .style(Style::default().fg(Color::Yellow).bg(Color::Black));
         frame.render_widget(paragraph, area);
@@ -55,7 +55,7 @@ fn render_files_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let first_line =
         format!("Files | {path} | {kind} | {size} | {modified} | {watch} | {markdown}");
     let second_line =
-        "j/k move  h/l expand  / search  m markdown  v editor tab  e external  Ctrl-b commands  q quit"
+        "j/k move  h/l expand  / search  m markdown  v editor  e external  1..9/Tab tabs  c new  ? help  q quit"
             .to_string();
 
     let text = Text::from(vec![Line::from(first_line), Line::from(second_line)]);
@@ -98,8 +98,16 @@ fn render_terminal_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         ""
     };
+    let help = match terminal.state {
+        TerminalTabState::Running => "Ctrl-b commands while running",
+        TerminalTabState::NotStarted => "Enter start | 1..9/Tab tabs",
+        TerminalTabState::Starting => "starting",
+        TerminalTabState::Exited { .. } | TerminalTabState::Failed { .. } => {
+            "Enter/r restart | x close/reset | 1..9/Tab tabs"
+        }
+    };
     let line = format!(
-        "{} | {state} | {pid} | {dimensions} | Ctrl-b commands{extra}",
+        "{} | {state} | {pid} | {dimensions} | {help}{extra}",
         tab.title
     );
     let paragraph = Paragraph::new(line).style(Style::default().fg(Color::White).bg(Color::Black));

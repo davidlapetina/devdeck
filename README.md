@@ -153,8 +153,14 @@ y / Y          Copy relative/absolute path
 e              Open externally
 v              Open selected file in a temporary editor tab
 r / R          Reload file/tree
-q              Quit
+1..9           Select tab by position
+Tab / BackTab  Next/previous tab
+c              Create temporary command tab
+?              Help overlay
+q              Quit with confirmation
 ```
+
+When a terminal tab is running, normal keyboard input goes directly to the child process. Use the command prefix for DevDeck commands that would otherwise be typed into Claude, Codex, a shell, Vim, Less, or another terminal program.
 
 Command prefix:
 
@@ -167,9 +173,21 @@ Ctrl-b c        Create temporary command tab
 Ctrl-b x        Stop or close current terminal tab
 Ctrl-b r        Restart current terminal tab
 Ctrl-b e        Reload configuration
+Ctrl-b q        Quit with confirmation
 Ctrl-b ?        Help overlay
 Ctrl-b ,        Rename temporary tab
 Ctrl-b Ctrl-b   Send literal Ctrl-b to the child process
+```
+
+Inactive terminal tabs also accept direct commands:
+
+```text
+Enter / r       Start or restart an exited/failed terminal tab
+x               Close a temporary tab or reset a configured tab
+1..9            Select tab by position
+Tab / BackTab   Next/previous tab
+?               Help overlay
+q               Quit with confirmation
 ```
 
 Prompt overlay:
@@ -201,7 +219,7 @@ export VISUAL=vim
 devdeck .
 ```
 
-When an in-DevDeck editor tab exits, focus returns to the Files tab. The exited editor tab remains visible and can be closed with `Ctrl-b x`.
+When an in-DevDeck editor tab exits, focus returns to the Files tab. The exited editor tab remains visible and can be closed with `x` when selected or with `Ctrl-b x` from any running terminal tab.
 
 ## Configuration Reload
 
