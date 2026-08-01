@@ -17,7 +17,7 @@ use crate::{
     preview::PreviewState,
     pty::input::key_event_to_bytes,
     search::SearchState,
-    session::{launcher::command_spec_from_profile, SessionId, SessionRegistry},
+    session::{launcher::command_spec_from_profile, CommandSpec, SessionId, SessionRegistry},
     tabs::{ActivityState, Tab, TabContent, TabId, TerminalTabState},
 };
 
@@ -1240,7 +1240,7 @@ impl App {
         let command = command_spec_from_profile(&profile, &self.root_path);
         match self.sessions.start(
             title,
-            command,
+            command.clone(),
             self.terminal_dimensions.rows,
             self.terminal_dimensions.cols,
             event_tx.clone(),
@@ -1258,10 +1258,13 @@ impl App {
                     terminal.session_id = None;
                     terminal.pending_restart_at = None;
                     terminal.state = TerminalTabState::Failed {
-                        message: editor_friendly_spawn_error(&error),
+                        message: spawn_failure_message(&command, &error),
                     };
                 }
-                self.set_status(format!("Unable to start terminal: {error:#}"));
+                self.set_status(format!(
+                    "Unable to start terminal: {}",
+                    spawn_failure_message(&command, &error)
+                ));
             }
         }
     }
@@ -1668,12 +1671,27 @@ fn executable_exists(executable: &str) -> bool {
     })
 }
 
-fn editor_friendly_spawn_error(error: &anyhow::Error) -> String {
-    let message = error.to_string();
-    if message.contains("No such file") || message.contains("not found") {
-        "executable not found".to_string()
+fn spawn_failure_message(command: &CommandSpec, error: &anyhow::Error) -> String {
+    let causes = error
+        .chain()
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>();
+    let combined = causes.join("\n").to_ascii_lowercase();
+    if combined.contains("no such file")
+        || combined.contains("not found")
+        || combined.contains("could not find")
+        || !executable_exists(&command.executable)
+    {
+        format!("Executable not found: {}", command.executable)
     } else {
-        message
+        let detail = causes
+            .iter()
+            .rev()
+            .find(|cause| !cause.starts_with("Unable to start session"))
+            .or_else(|| causes.last())
+            .cloned()
+            .unwrap_or_else(|| "unknown error".to_string());
+        format!("{}: {detail}", command.executable)
     }
 }
 
@@ -2034,6 +2052,23 @@ mod tests {
         let terminal = app.tabs[1].as_terminal().unwrap();
         assert!(terminal.session_id.is_none());
         assert!(matches!(terminal.state, TerminalTabState::Failed { .. }));
+    }
+
+    #[test]
+    fn spawn_failure_for_missing_executable_mentions_command() {
+        let temp = TempDir::new().unwrap();
+        let command = CommandSpec {
+            executable: "devdeck-missing-command-for-test".to_string(),
+            args: Vec::new(),
+            cwd: temp.path().to_path_buf(),
+            env: HashMap::new(),
+        };
+        let error = anyhow::anyhow!("Unable to start session 5");
+
+        assert_eq!(
+            spawn_failure_message(&command, &error),
+            "Executable not found: devdeck-missing-command-for-test"
+        );
     }
 
     #[test]

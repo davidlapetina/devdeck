@@ -11,6 +11,11 @@
 #   DevDeck's `v` command resolves VISUAL, then EDITOR, then vi.
 #   To prefer Vim for editor tabs:
 #     export VISUAL=vim
+#
+# Command tabs:
+#   Claude, Codex, lazygit, and Vim are not bundled with DevDeck.
+#   Install the tools you want and make sure `command -v <tool>` works
+#   in the shell that starts DevDeck.
 
 version = 1
 

@@ -109,6 +109,14 @@ command = "lazygit"
 auto_start = false
 ```
 
+The Git example uses `lazygit`. DevDeck does not bundle `lazygit`; install it separately and make sure it is on `PATH` before starting DevDeck:
+
+```bash
+command -v lazygit
+```
+
+If you install `lazygit` while DevDeck is already running, restart DevDeck from a shell that can find `lazygit`, or retry the Git tab after confirming the inherited `PATH` is correct.
+
 Each terminal profile supports:
 
 ```toml
@@ -126,6 +134,7 @@ Expansion rules:
 - `~` and environment variables are expanded in `command`, `args`, `cwd`, and environment values.
 - Relative `cwd` values resolve against the repository root.
 - Commands launch as executable plus argument vector, not through an implicit shell.
+- If a configured command is missing, its tab shows `Executable not found: <command>` and DevDeck keeps running.
 
 A copyable sample is available at [examples/devdeck.toml](examples/devdeck.toml).
 
