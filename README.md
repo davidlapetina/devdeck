@@ -203,6 +203,14 @@ Tab / BackTab   Next/previous tab
 q               Quit with confirmation
 ```
 
+Tab activity markers:
+
+```text
+*               Inactive terminal tab has recent output
+.               Inactive terminal tab produced output, then went quiet
+!               Terminal process exited or failed
+```
+
 Prompt overlay:
 
 ```text

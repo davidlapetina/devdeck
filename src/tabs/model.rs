@@ -114,7 +114,8 @@ impl TerminalTabState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivityState {
     None,
-    UnreadOutput,
+    OutputActive { last_output_at: Instant },
+    OutputQuiet,
 }
 
 #[cfg(test)]

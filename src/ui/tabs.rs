@@ -2,7 +2,7 @@ use ratatui::{prelude::*, widgets::*};
 
 use crate::{
     app::App,
-    tabs::{ActivityState, TabContent},
+    tabs::{ActivityState, TabContent, TerminalTabState},
 };
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -20,22 +20,26 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let mut spans = Vec::new();
     for (index, tab) in app.tabs.iter().enumerate() {
-        let activity = match tab.activity {
-            ActivityState::None => "",
-            ActivityState::UnreadOutput => "*",
-        };
         let state = match &tab.content {
             TabContent::Repository => "",
             TabContent::Terminal(terminal)
                 if matches!(
                     terminal.state,
-                    crate::tabs::TerminalTabState::Exited { .. }
-                        | crate::tabs::TerminalTabState::Failed { .. }
+                    TerminalTabState::Exited { .. } | TerminalTabState::Failed { .. }
                 ) =>
             {
                 "!"
             }
             TabContent::Terminal(_) => "",
+        };
+        let activity = if state.is_empty() {
+            match tab.activity {
+                ActivityState::None => "",
+                ActivityState::OutputActive { .. } => "*",
+                ActivityState::OutputQuiet => ".",
+            }
+        } else {
+            ""
         };
         let label = format!("[{} {}{}{}] ", index + 1, tab.title, activity, state);
         let style = if index == app.active_tab {

@@ -27,6 +27,7 @@ const DEFAULT_TERMINAL_COLS: u16 = 80;
 const RESTART_ON_EXIT_DELAY: Duration = Duration::from_secs(1);
 const FAST_RESTART_WINDOW: Duration = Duration::from_secs(5);
 const MAX_FAST_RESTARTS: u8 = 3;
+const BACKGROUND_OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalOpen {
@@ -300,22 +301,31 @@ impl App {
     }
 
     pub fn handle_pty_output(&mut self, session_id: SessionId, bytes: &[u8]) {
+        let now = Instant::now();
         self.sessions.handle_output(session_id, bytes);
+        if bytes.is_empty() {
+            return;
+        }
         if let Some(index) = self.tab_index_for_session(session_id) {
             if index != self.active_tab {
-                self.tabs[index].activity = ActivityState::UnreadOutput;
+                self.tabs[index].activity = ActivityState::OutputActive {
+                    last_output_at: now,
+                };
             }
         }
     }
 
     pub fn tick(&mut self, event_tx: &EventSender) {
+        let now = Instant::now();
         if self
             .status_set_at
-            .is_some_and(|set_at| set_at.elapsed() > STATUS_TTL)
+            .is_some_and(|set_at| now.duration_since(set_at) > STATUS_TTL)
         {
             self.status_message = None;
             self.status_set_at = None;
         }
+
+        self.update_background_activity(now);
 
         for (session_id, exit_code) in self.sessions.poll_exits() {
             self.handle_terminal_exit(session_id, exit_code, event_tx);
@@ -344,6 +354,23 @@ impl App {
                 terminal.pending_restart_at = None;
             }
             self.start_terminal_tab(index, event_tx);
+        }
+    }
+
+    fn update_background_activity(&mut self, now: Instant) {
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            if index == self.active_tab {
+                continue;
+            }
+            let ActivityState::OutputActive { last_output_at } = tab.activity else {
+                continue;
+            };
+            let Some(elapsed) = now.checked_duration_since(last_output_at) else {
+                continue;
+            };
+            if elapsed >= BACKGROUND_OUTPUT_QUIET_AFTER {
+                tab.activity = ActivityState::OutputQuiet;
+            }
         }
     }
 
@@ -380,7 +407,7 @@ impl App {
             terminal.state = TerminalTabState::Exited { exit_code };
         }
         if index != self.active_tab {
-            self.tabs[index].activity = ActivityState::UnreadOutput;
+            self.tabs[index].activity = ActivityState::OutputQuiet;
         }
         if index == self.active_tab && should_return_to_files {
             self.select_tab(0, event_tx);
@@ -909,12 +936,36 @@ impl App {
         if index >= self.tabs.len() {
             return;
         }
+        let previous = self.active_tab;
+        if previous != index {
+            self.watch_recent_output_for_background_tab(previous, Instant::now());
+        }
         self.active_tab = index;
         self.tabs[index].activity = ActivityState::None;
         self.input_mode = base_mode_for_tab(&self.tabs[index]);
         self.confirm_tab = None;
         self.start_terminal_tab(index, event_tx);
         self.resize_active_terminal(self.terminal_dimensions);
+    }
+
+    fn watch_recent_output_for_background_tab(&mut self, index: usize, now: Instant) {
+        let Some(last_output_at) = self
+            .tabs
+            .get(index)
+            .and_then(Tab::as_terminal)
+            .filter(|terminal| terminal.state.is_running())
+            .and_then(|terminal| terminal.session_id)
+            .and_then(|session_id| self.sessions.session(session_id))
+            .and_then(|session| session.last_activity)
+        else {
+            return;
+        };
+        let Some(elapsed) = now.checked_duration_since(last_output_at) else {
+            return;
+        };
+        if elapsed < BACKGROUND_OUTPUT_QUIET_AFTER {
+            self.tabs[index].activity = ActivityState::OutputActive { last_output_at };
+        }
     }
 
     fn select_next_tab(&mut self, event_tx: &EventSender) {
@@ -1233,6 +1284,7 @@ impl App {
             }
         }
 
+        self.tabs[index].activity = ActivityState::None;
         if let Some(terminal) = self.tabs[index].terminal_mut() {
             terminal.state = TerminalTabState::Starting;
         }
@@ -1764,7 +1816,7 @@ pub fn validate_root(path: PathBuf) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs};
+    use std::{collections::HashMap, fs, time::Duration};
 
     use tempfile::TempDir;
 
@@ -1780,6 +1832,18 @@ mod tests {
 
     fn app(temp: &TempDir) -> App {
         App::new(temp.path().to_path_buf(), false, false, empty_config()).unwrap()
+    }
+
+    fn terminal_profile(name: &str) -> TerminalProfile {
+        TerminalProfile {
+            name: name.to_string(),
+            command: "sh".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            env: HashMap::new(),
+            auto_start: false,
+            restart_on_exit: false,
+        }
     }
 
     #[test]
@@ -1993,6 +2057,71 @@ mod tests {
         assert_eq!(terminal.profile.command, "printf");
         assert_eq!(terminal.profile.args, ["hello"]);
         app.stop_all_sessions();
+    }
+
+    #[test]
+    fn inactive_terminal_output_marks_active_then_quiet() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        let session_id = SessionId(42);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Codex"),
+            false,
+        ));
+        let terminal = app.tabs[1].terminal_mut().unwrap();
+        terminal.session_id = Some(session_id);
+        terminal.state = TerminalTabState::Running;
+
+        app.handle_pty_output(session_id, b"working\n");
+        let ActivityState::OutputActive { last_output_at } = app.tabs[1].activity else {
+            panic!("inactive output should mark the tab active");
+        };
+
+        app.update_background_activity(
+            last_output_at + BACKGROUND_OUTPUT_QUIET_AFTER + Duration::from_millis(1),
+        );
+
+        assert_eq!(app.tabs[1].activity, ActivityState::OutputQuiet);
+    }
+
+    #[test]
+    fn active_terminal_output_does_not_set_background_indicator() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        let session_id = SessionId(42);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Codex"),
+            false,
+        ));
+        app.active_tab = 1;
+        let terminal = app.tabs[1].terminal_mut().unwrap();
+        terminal.session_id = Some(session_id);
+        terminal.state = TerminalTabState::Running;
+
+        app.handle_pty_output(session_id, b"visible\n");
+
+        assert_eq!(app.tabs[1].activity, ActivityState::None);
+    }
+
+    #[test]
+    fn selecting_tab_clears_background_activity_indicator() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Codex"),
+            false,
+        ));
+        let terminal = app.tabs[1].terminal_mut().unwrap();
+        terminal.state = TerminalTabState::Running;
+        app.tabs[1].activity = ActivityState::OutputQuiet;
+        let (tx, _rx) = crate::event::channel();
+
+        app.select_tab(1, &tx);
+
+        assert_eq!(app.tabs[1].activity, ActivityState::None);
     }
 
     #[test]
