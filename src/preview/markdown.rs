@@ -24,7 +24,53 @@ struct TableState {
     current_cell: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownLink {
+    pub target: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarkdownRender {
+    pub lines: Vec<Line<'static>>,
+    pub focused_link_line: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSpan {
+    text: String,
+    style: Style,
+    link_index: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct LinkContext {
+    target: String,
+    index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MarkdownAnchor {
+    slug: String,
+    line: usize,
+}
+
 pub fn render_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
+    render_markdown_with_focus(content, width, None).lines
+}
+
+pub fn render_markdown_with_focus(
+    content: &str,
+    width: usize,
+    focused_link: Option<usize>,
+) -> MarkdownRender {
+    let renderer = render_markdown_full(content, width.max(1), focused_link);
+    MarkdownRender {
+        lines: renderer.lines,
+        focused_link_line: renderer.focused_link_line,
+    }
+}
+
+fn render_markdown_full(content: &str, width: usize, focused_link: Option<usize>) -> Renderer {
     let width = width.max(1);
     let mut renderer = Renderer {
         lines: Vec::new(),
@@ -39,6 +85,11 @@ pub fn render_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
         in_code_block: false,
         code_buffer: String::new(),
         link_target: None,
+        link_count: 0,
+        focused_link,
+        focused_link_line: None,
+        heading_text: None,
+        anchors: Vec::new(),
         table: None,
         width,
     };
@@ -57,19 +108,62 @@ pub fn render_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
         renderer.lines.push(Line::from(""));
     }
 
-    renderer.lines
+    renderer
+}
+
+pub fn collect_links(content: &str) -> Vec<MarkdownLink> {
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS;
+
+    let mut in_table = false;
+    let mut links = Vec::new();
+    for event in Parser::new_ext(content, options) {
+        match event {
+            Event::Start(Tag::Table(_)) => in_table = true,
+            Event::End(Tag::Table(_)) => in_table = false,
+            Event::Start(Tag::Link(_, target, _)) if !in_table => links.push(MarkdownLink {
+                target: target.to_string(),
+            }),
+            _ => {}
+        };
+    }
+    links
+}
+
+pub fn focused_link_line(content: &str, width: usize, focused_link: usize) -> Option<usize> {
+    render_markdown_with_focus(content, width, Some(focused_link)).focused_link_line
+}
+
+pub fn anchor_line(content: &str, width: usize, anchor: &str) -> Option<usize> {
+    let requested = normalize_anchor(anchor);
+    if requested.is_empty() {
+        return None;
+    }
+    let renderer = render_markdown_full(content, width.max(1), None);
+    renderer
+        .anchors
+        .into_iter()
+        .find(|heading| heading.slug == requested)
+        .map(|heading| heading.line)
 }
 
 struct Renderer {
     lines: Vec<Line<'static>>,
-    current: Vec<Span<'static>>,
+    current: Vec<PendingSpan>,
     mode: TextMode,
     heading_level: Option<u8>,
     quote_depth: usize,
     list_stack: Vec<ListFrame>,
     in_code_block: bool,
     code_buffer: String,
-    link_target: Option<String>,
+    link_target: Option<LinkContext>,
+    link_count: usize,
+    focused_link: Option<usize>,
+    focused_link_line: Option<usize>,
+    heading_text: Option<String>,
+    anchors: Vec<MarkdownAnchor>,
     table: Option<TableState>,
     width: usize,
 }
@@ -129,6 +223,7 @@ impl Renderer {
             Tag::Heading(level, _, _) => {
                 self.flush_current();
                 self.heading_level = Some(level as u8);
+                self.heading_text = Some(String::new());
             }
             Tag::BlockQuote => {
                 self.flush_current();
@@ -152,7 +247,14 @@ impl Renderer {
             }
             Tag::Emphasis => self.mode.italic = true,
             Tag::Strong => self.mode.bold = true,
-            Tag::Link(_, target, _) => self.link_target = Some(target.to_string()),
+            Tag::Link(_, target, _) => {
+                let index = self.link_count;
+                self.link_count += 1;
+                self.link_target = Some(LinkContext {
+                    target: target.to_string(),
+                    index,
+                });
+            }
             Tag::Table(_) => {
                 self.flush_current();
                 self.table = Some(TableState::default());
@@ -168,7 +270,17 @@ impl Renderer {
 
     fn end_tag(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::Paragraph | Tag::Heading(_, _, _) => {
+            Tag::Paragraph => {
+                self.flush_current();
+            }
+            Tag::Heading(_, _, _) => {
+                let line = self.lines.len();
+                if let Some(text) = self.heading_text.take() {
+                    let slug = slugify_heading(&text);
+                    if !slug.is_empty() {
+                        self.anchors.push(MarkdownAnchor { slug, line });
+                    }
+                }
                 self.flush_current();
                 self.heading_level = None;
             }
@@ -184,13 +296,8 @@ impl Renderer {
             Tag::Emphasis => self.mode.italic = false,
             Tag::Strong => self.mode.bold = false,
             Tag::Link(_, _, _) => {
-                if let Some(target) = self.link_target.take() {
-                    self.push_span(
-                        format!(" ({target})"),
-                        Style::default()
-                            .fg(Color::Blue)
-                            .add_modifier(Modifier::UNDERLINED),
-                    );
+                if let Some(link) = self.link_target.take() {
+                    self.push_span(format!(" ({})", link.target), self.link_style(link.index));
                 }
             }
             Tag::CodeBlock(_) => self.end_code_block(),
@@ -269,12 +376,19 @@ impl Renderer {
     }
 
     fn push_text(&mut self, text: &str) {
+        if let Some(heading_text) = &mut self.heading_text {
+            heading_text.push_str(text);
+        }
         self.push_span(text.to_string(), self.current_style());
     }
 
     fn push_span(&mut self, text: String, style: Style) {
         if !text.is_empty() {
-            self.current.push(Span::styled(text, style));
+            self.current.push(PendingSpan {
+                text,
+                style,
+                link_index: self.link_target.as_ref().map(|link| link.index),
+            });
         }
     }
 
@@ -294,7 +408,21 @@ impl Renderer {
         if self.mode.italic {
             style = style.add_modifier(Modifier::ITALIC);
         }
+        if let Some(link) = &self.link_target {
+            style = self.link_style(link.index);
+        }
         style
+    }
+
+    fn link_style(&self, link_index: usize) -> Style {
+        let style = Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::UNDERLINED);
+        if self.focused_link == Some(link_index) {
+            style.fg(Color::Black).bg(Color::Yellow)
+        } else {
+            style
+        }
     }
 
     fn flush_current(&mut self) {
@@ -303,7 +431,12 @@ impl Renderer {
         }
 
         let spans = std::mem::take(&mut self.current);
-        self.lines.extend(wrap_spans(spans, self.width));
+        let start_line = self.lines.len();
+        let (lines, focused_line) = wrap_spans(spans, self.width, self.focused_link);
+        if self.focused_link_line.is_none() {
+            self.focused_link_line = focused_line.map(|line| start_line + line);
+        }
+        self.lines.extend(lines);
     }
 
     fn end_code_block(&mut self) {
@@ -377,34 +510,96 @@ impl Renderer {
     }
 }
 
-fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
+fn wrap_spans(
+    spans: Vec<PendingSpan>,
+    width: usize,
+    focused_link: Option<usize>,
+) -> (Vec<Line<'static>>, Option<usize>) {
     let mut lines = Vec::new();
     let mut current = Vec::new();
     let mut current_width = 0;
+    let mut current_focused = false;
+    let mut focused_line = None;
+
+    let push_line = |lines: &mut Vec<Line<'static>>,
+                     current: &mut Vec<Span<'static>>,
+                     current_focused: &mut bool,
+                     focused_line: &mut Option<usize>| {
+        if *current_focused && focused_line.is_none() {
+            *focused_line = Some(lines.len());
+        }
+        lines.push(Line::from(std::mem::take(current)));
+        *current_focused = false;
+    };
 
     for span in spans {
         let style = span.style;
-        let content = span.content.into_owned();
-        for ch in content.chars() {
+        let link_index = span.link_index;
+        for ch in span.text.chars() {
             if ch == '\n' {
-                lines.push(Line::from(std::mem::take(&mut current)));
+                push_line(
+                    &mut lines,
+                    &mut current,
+                    &mut current_focused,
+                    &mut focused_line,
+                );
                 current_width = 0;
                 continue;
             }
 
             let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
             if current_width + char_width > width && !current.is_empty() {
-                lines.push(Line::from(std::mem::take(&mut current)));
+                push_line(
+                    &mut lines,
+                    &mut current,
+                    &mut current_focused,
+                    &mut focused_line,
+                );
                 current_width = 0;
             }
 
+            if focused_link.is_some() && link_index == focused_link {
+                current_focused = true;
+            }
             current.push(Span::styled(ch.to_string(), style));
             current_width += char_width;
         }
     }
 
-    lines.push(Line::from(current));
-    lines
+    push_line(
+        &mut lines,
+        &mut current,
+        &mut current_focused,
+        &mut focused_line,
+    );
+    (lines, focused_line)
+}
+
+fn normalize_anchor(anchor: &str) -> String {
+    anchor.trim_start_matches('#').trim().to_ascii_lowercase()
+}
+
+fn slugify_heading(text: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+
+    for ch in text.trim().chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            previous_dash = false;
+        } else if ch.is_whitespace() || ch == '-' {
+            if !slug.is_empty() && !previous_dash {
+                slug.push('-');
+                previous_dash = true;
+            }
+        }
+    }
+
+    if previous_dash {
+        slug.pop();
+    }
+
+    slug
 }
 
 #[cfg(test)]
@@ -431,6 +626,40 @@ mod tests {
         assert!(rendered.iter().any(|line| line.contains("[x] task")));
         assert!(rendered.iter().any(|line| line.contains("> quote")));
         assert!(rendered.iter().any(|line| line.contains("A | B")));
+    }
+
+    #[test]
+    fn collects_and_focuses_links() {
+        let content = "[Docs](docs/readme.md)\n\n[Web](https://example.com)";
+        let links = collect_links(content);
+
+        assert_eq!(
+            links,
+            vec![
+                MarkdownLink {
+                    target: "docs/readme.md".to_string(),
+                },
+                MarkdownLink {
+                    target: "https://example.com".to_string(),
+                },
+            ]
+        );
+
+        let rendered = render_markdown_with_focus(content, 80, Some(1));
+        assert!(rendered.focused_link_line.is_some());
+        assert!(rendered
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.style.bg == Some(Color::Yellow)));
+    }
+
+    #[test]
+    fn finds_heading_anchor_lines() {
+        assert_eq!(
+            anchor_line("# Hello, World!\n\nText", 80, "hello-world"),
+            Some(0)
+        );
     }
 
     #[test]

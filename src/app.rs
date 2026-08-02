@@ -14,7 +14,7 @@ use crate::{
     event::{EventSender, FsEventBatch},
     filesystem::tree::{FileTree, VisibleEntry},
     input::keymap::{map_key, KeyAction},
-    preview::PreviewState,
+    preview::{self, PreviewContent, PreviewState},
     pty::input::key_event_to_bytes,
     search::SearchState,
     session::{launcher::command_spec_from_profile, CommandSpec, SessionId, SessionRegistry},
@@ -29,10 +29,11 @@ const FAST_RESTART_WINDOW: Duration = Duration::from_secs(5);
 const MAX_FAST_RESTARTS: u8 = 3;
 const BACKGROUND_OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalOpen {
     Editor,
     OperatingSystem,
+    Url(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +109,7 @@ pub struct App {
     pub selected_index: usize,
     pub expanded_directories: HashSet<PathBuf>,
     pub preview: PreviewState,
+    pub preview_link_index: Option<usize>,
     pub search: SearchState,
     pub show_hidden: bool,
     pub watch_enabled: bool,
@@ -169,6 +171,7 @@ impl App {
             selected_index: 0,
             expanded_directories,
             preview,
+            preview_link_index: None,
             search: SearchState::default(),
             show_hidden,
             watch_enabled,
@@ -292,6 +295,7 @@ impl App {
                 if selected.exists() {
                     let scroll = self.preview.scroll;
                     self.preview = PreviewState::load_with_scroll(selected, scroll);
+                    self.preview_link_index = None;
                     self.set_status(format!("Refreshed: {}", self.relative_display(selected)));
                 } else {
                     self.set_status("Selected file was deleted".to_string());
@@ -497,6 +501,9 @@ impl App {
         match action {
             KeyAction::MoveDown => self.move_selection(1),
             KeyAction::MoveUp => self.move_selection(-1),
+            KeyAction::Activate if self.preview_link_index.is_some() => {
+                return self.activate_preview_link();
+            }
             KeyAction::ExpandOrEnter | KeyAction::Activate => self.expand_or_enter(),
             KeyAction::CollapseOrParent => self.collapse_or_parent(),
             KeyAction::First => self.select_index(0),
@@ -515,6 +522,8 @@ impl App {
             KeyAction::PreviewLineUp => self.preview.scroll_lines(-1),
             KeyAction::PreviewTop => self.preview.scroll_top(),
             KeyAction::PreviewBottom => self.preview.scroll_bottom(),
+            KeyAction::PreviewLinkNext => self.focus_preview_link(1),
+            KeyAction::PreviewLinkPrevious => self.focus_preview_link(-1),
             KeyAction::Search => {
                 let entries = self.tree.all_entries();
                 self.search.open(&entries);
@@ -1515,6 +1524,7 @@ impl App {
             self.selected_index = index;
             self.selected_path = Some(path.clone());
             self.preview = PreviewState::load(&path, false);
+            self.preview_link_index = None;
         }
     }
 
@@ -1537,6 +1547,7 @@ impl App {
             self.selected_path = Some(target.clone());
             if reset_preview {
                 self.preview = PreviewState::load(&target, false);
+                self.preview_link_index = None;
             }
         }
     }
@@ -1605,11 +1616,161 @@ impl App {
 
     fn toggle_markdown(&mut self) {
         self.markdown_rendered = !self.markdown_rendered;
+        if !self.markdown_rendered {
+            self.preview_link_index = None;
+        }
         self.set_status(if self.markdown_rendered {
             "Markdown rendered"
         } else {
             "Markdown raw"
         });
+    }
+
+    fn preview_links(&self) -> Vec<preview::markdown::MarkdownLink> {
+        if !self.markdown_rendered {
+            return Vec::new();
+        }
+
+        match &self.preview.content {
+            PreviewContent::Markdown { content } => preview::markdown::collect_links(content),
+            _ => Vec::new(),
+        }
+    }
+
+    fn focus_preview_link(&mut self, delta: isize) {
+        let links = self.preview_links();
+        if links.is_empty() {
+            self.preview_link_index = None;
+            self.set_status("No links in rendered Markdown preview");
+            return;
+        }
+
+        let len = links.len();
+        let next = match self.preview_link_index {
+            Some(index) if delta.is_negative() => {
+                if index == 0 {
+                    len - 1
+                } else {
+                    index - 1
+                }
+            }
+            Some(index) => (index + 1) % len,
+            None if delta.is_negative() => len - 1,
+            None => 0,
+        };
+        self.preview_link_index = Some(next);
+        self.scroll_to_preview_link(next);
+        self.set_status(format!("Link {}/{}: {}", next + 1, len, links[next].target));
+    }
+
+    fn activate_preview_link(&mut self) -> Option<ExternalOpen> {
+        let Some(index) = self.preview_link_index else {
+            return None;
+        };
+        let links = self.preview_links();
+        let Some(link) = links.get(index) else {
+            self.preview_link_index = None;
+            self.set_status("Link is no longer available");
+            return None;
+        };
+        let target = link.target.trim().to_string();
+        if target.is_empty() {
+            self.set_status("Link target is empty");
+            return None;
+        }
+        if is_external_link_target(&target) {
+            return Some(ExternalOpen::Url(target));
+        }
+
+        let (path_part, fragment) = split_link_fragment(&target);
+        let Some(path) = self.resolve_markdown_link_path(path_part) else {
+            self.set_status(format!("Link target not found: {target}"));
+            return None;
+        };
+
+        if !path.exists() {
+            self.set_status(format!("Link target not found: {target}"));
+            return None;
+        }
+
+        self.select_path(&path, true);
+        if let Some(fragment) = fragment {
+            self.scroll_to_markdown_anchor(fragment);
+        }
+        self.set_status(format!("Opened link: {}", self.relative_display(&path)));
+        None
+    }
+
+    fn scroll_to_preview_link(&mut self, link_index: usize) {
+        let PreviewContent::Markdown { content } = &self.preview.content else {
+            return;
+        };
+        let width = self.preview_render_width();
+        if width == 0 {
+            return;
+        }
+        if let Some(line) = preview::markdown::focused_link_line(content, width, link_index) {
+            self.scroll_preview_to_line(line);
+        }
+    }
+
+    fn scroll_to_markdown_anchor(&mut self, fragment: &str) {
+        let PreviewContent::Markdown { content } = &self.preview.content else {
+            return;
+        };
+        let width = self.preview_render_width();
+        if width == 0 {
+            return;
+        }
+        if let Some(line) = preview::markdown::anchor_line(content, width, fragment) {
+            self.scroll_preview_to_line(line);
+        }
+    }
+
+    fn scroll_preview_to_line(&mut self, line: usize) {
+        if line < self.preview.scroll {
+            self.preview.scroll = line;
+        } else {
+            let visible_bottom = self
+                .preview
+                .scroll
+                .saturating_add(self.preview.viewport_height.saturating_sub(1));
+            if line > visible_bottom {
+                self.preview.scroll = line.saturating_sub(self.preview.viewport_height / 2);
+            }
+        }
+        self.preview.clamp_scroll();
+    }
+
+    fn preview_render_width(&self) -> usize {
+        self.preview.viewport_width.saturating_sub(2).max(1)
+    }
+
+    fn resolve_markdown_link_path(&self, path_part: &str) -> Option<PathBuf> {
+        let current = self
+            .preview
+            .path
+            .as_deref()
+            .or(self.selected_path.as_deref())?;
+        if path_part.is_empty() {
+            return Some(current.to_path_buf());
+        }
+
+        let raw_path = Path::new(path_part);
+        let candidate = if raw_path.is_absolute() {
+            if raw_path.starts_with(&self.root_path) {
+                raw_path.to_path_buf()
+            } else {
+                self.root_path.join(path_part.trim_start_matches('/'))
+            }
+        } else {
+            current
+                .parent()
+                .unwrap_or(self.root_path.as_path())
+                .join(raw_path)
+        };
+
+        Some(candidate.canonicalize().unwrap_or(candidate))
     }
 
     fn copy_selected_path(&mut self, absolute: bool) {
@@ -1640,6 +1801,7 @@ impl App {
             0
         };
         self.preview = PreviewState::load_with_scroll(&path, scroll);
+        self.preview_link_index = None;
         self.set_status(format!("Reloaded: {}", self.relative_display(&path)));
     }
 
@@ -1751,6 +1913,26 @@ fn paths_related(selected: &Path, changed: &Path) -> bool {
     selected == changed || changed.starts_with(selected) || selected.starts_with(changed)
 }
 
+fn split_link_fragment(target: &str) -> (&str, Option<&str>) {
+    target
+        .split_once('#')
+        .map(|(path, fragment)| (path, Some(fragment)))
+        .unwrap_or((target, None))
+}
+
+fn is_external_link_target(target: &str) -> bool {
+    let Some((scheme, _)) = target.split_once(':') else {
+        return false;
+    };
+    scheme
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+}
+
 fn is_ctrl_b(event: KeyEvent) -> bool {
     matches!(
         event,
@@ -1860,6 +2042,47 @@ mod tests {
         let notes = temp.path().canonicalize().unwrap().join("notes.md");
         app.select_path(&notes, true);
         assert!(!app.markdown_rendered);
+    }
+
+    #[test]
+    fn markdown_preview_links_navigate_to_local_files() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join("README.md"), "[Guide](docs/guide.md)").unwrap();
+        fs::write(temp.path().join("docs/guide.md"), "# Guide").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        let (tx, _rx) = crate::event::channel();
+
+        app.select_path(&root.join("README.md"), true);
+        app.preview.set_measurements(80, 10, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE), &tx);
+        let open = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+
+        assert_eq!(open, None);
+        assert_eq!(
+            app.selected_path(),
+            Some(root.join("docs/guide.md").as_path())
+        );
+    }
+
+    #[test]
+    fn markdown_preview_links_open_external_urls() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("README.md"), "[Web](https://example.com)").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        let (tx, _rx) = crate::event::channel();
+
+        app.select_path(&root.join("README.md"), true);
+        app.preview.set_measurements(80, 10, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE), &tx);
+        let open = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+
+        assert_eq!(
+            open,
+            Some(ExternalOpen::Url("https://example.com".to_string()))
+        );
     }
 
     #[test]

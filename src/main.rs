@@ -1,5 +1,6 @@
 use std::{
     env,
+    ffi::OsStr,
     io::{self, Stdout},
     path::Path,
     process::Command,
@@ -175,19 +176,38 @@ fn handle_external_open(
     app: &mut App,
     open: ExternalOpen,
 ) -> Result<()> {
+    let editor_open = match open {
+        ExternalOpen::Url(target) => {
+            restore_terminal(terminal)?;
+            let result = open_with_os_arg(&target);
+            std::thread::sleep(Duration::from_millis(25));
+            resume_terminal(terminal)?;
+
+            match result {
+                Ok(()) => app.set_status(format!("Opened: {target}")),
+                Err(error) => app.set_status(format!("Open failed: {error:#}")),
+            }
+
+            return Ok(());
+        }
+        ExternalOpen::Editor => true,
+        ExternalOpen::OperatingSystem => false,
+    };
+
     let Some(path) = app.selected_external_path() else {
         return Ok(());
     };
 
-    if matches!(open, ExternalOpen::Editor) && !path.is_file() {
+    if editor_open && !path.is_file() {
         app.set_status("Selected entry is not a file");
         return Ok(());
     }
 
     restore_terminal(terminal)?;
-    let result = match open {
-        ExternalOpen::Editor => open_in_editor(&path),
-        ExternalOpen::OperatingSystem => open_with_os(&path),
+    let result = if editor_open {
+        open_in_editor(&path)
+    } else {
+        open_with_os(&path)
     };
     std::thread::sleep(Duration::from_millis(25));
     resume_terminal(terminal)?;
@@ -222,15 +242,19 @@ fn open_in_editor(path: &Path) -> Result<()> {
 }
 
 fn open_with_os(path: &Path) -> Result<()> {
+    open_with_os_arg(path.as_os_str())
+}
+
+fn open_with_os_arg(target: impl AsRef<OsStr>) -> Result<()> {
     let status = if cfg!(target_os = "macos") {
-        Command::new("open").arg(path).status()?
+        Command::new("open").arg(target.as_ref()).status()?
     } else if cfg!(target_os = "windows") {
         Command::new("cmd")
             .args(["/C", "start", ""])
-            .arg(path)
+            .arg(target.as_ref())
             .status()?
     } else {
-        Command::new("xdg-open").arg(path).status()?
+        Command::new("xdg-open").arg(target.as_ref()).status()?
     };
 
     if !status.success() {

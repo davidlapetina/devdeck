@@ -36,6 +36,7 @@ pub struct PreviewState {
     pub modified: Option<SystemTime>,
     pub content: PreviewContent,
     pub scroll: usize,
+    pub viewport_width: usize,
     pub viewport_height: usize,
     pub rendered_line_count: usize,
 }
@@ -49,6 +50,7 @@ impl Default for PreviewState {
             modified: None,
             content: PreviewContent::Empty,
             scroll: 0,
+            viewport_width: 0,
             viewport_height: 0,
             rendered_line_count: 0,
         }
@@ -71,7 +73,13 @@ impl PreviewState {
         state
     }
 
-    pub fn set_measurements(&mut self, viewport_height: usize, rendered_line_count: usize) {
+    pub fn set_measurements(
+        &mut self,
+        viewport_width: usize,
+        viewport_height: usize,
+        rendered_line_count: usize,
+    ) {
+        self.viewport_width = viewport_width;
         self.viewport_height = viewport_height;
         self.rendered_line_count = rendered_line_count;
         self.clamp_scroll();
@@ -122,13 +130,19 @@ pub fn render_lines(
     preview: &PreviewState,
     render_markdown: bool,
     width: u16,
+    focused_link: Option<usize>,
 ) -> Vec<Line<'static>> {
     match &preview.content {
         PreviewContent::Empty => vec![Line::from("")],
         PreviewContent::Directory { entries } => render_directory(preview, entries),
         PreviewContent::Text { content, language } => syntax::highlight(content, Some(*language)),
         PreviewContent::Markdown { content } if render_markdown => {
-            markdown::render_markdown(content, width.saturating_sub(2) as usize)
+            markdown::render_markdown_with_focus(
+                content,
+                width.saturating_sub(2) as usize,
+                focused_link,
+            )
+            .lines
         }
         PreviewContent::Markdown { content } => {
             syntax::highlight(content, Some(Language::Markdown))

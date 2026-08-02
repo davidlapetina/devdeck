@@ -17,7 +17,7 @@ Interactive Git tab running `lazygit` inside DevDeck:
 ## Features
 
 - Repository tree navigation with hidden-file toggle and generated-directory filtering
-- Plain text, source-code, binary metadata, and rendered Markdown previews
+- Plain text, source-code, binary metadata, and rendered Markdown previews with link navigation
 - Independent preview scrolling and automatic refresh on filesystem changes
 - Filename search
 - Relative and absolute path copying
@@ -162,6 +162,7 @@ Ctrl-d         Preview page down
 Ctrl-u         Preview page up
 J / K          Preview line down/up
 0 / $          Preview top/bottom
+] / [          Next/previous Markdown preview link
 y / Y          Copy relative/absolute path
 e              Open externally
 v              Open selected file in a temporary editor tab

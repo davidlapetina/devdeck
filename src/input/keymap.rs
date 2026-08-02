@@ -19,6 +19,8 @@ pub enum KeyAction {
     PreviewLineUp,
     PreviewTop,
     PreviewBottom,
+    PreviewLinkNext,
+    PreviewLinkPrevious,
     Search,
     RefreshFile,
     RefreshTree,
@@ -143,6 +145,16 @@ pub fn map_key(event: KeyEvent) -> Option<KeyAction> {
             modifiers: KeyModifiers::SHIFT,
             ..
         } => Some(KeyAction::PreviewBottom),
+        KeyEvent {
+            code: KeyCode::Char(']'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => Some(KeyAction::PreviewLinkNext),
+        KeyEvent {
+            code: KeyCode::Char('['),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => Some(KeyAction::PreviewLinkPrevious),
         KeyEvent {
             code: KeyCode::Char('/'),
             modifiers: KeyModifiers::NONE,

@@ -55,7 +55,7 @@ fn render_files_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let first_line =
         format!("Files | {path} | {kind} | {size} | {modified} | {watch} | {markdown}");
     let second_line =
-        "j/k move  h/l expand  / search  m markdown  v editor  e external  1..9/Tab tabs  c new  ? help  q quit"
+        "j/k move  h/l expand  / search  m markdown  ]/[ links  v editor  e external  1..9/Tab tabs  c new  ? help  q quit"
             .to_string();
 
     let text = Text::from(vec![Line::from(first_line), Line::from(second_line)]);

@@ -242,6 +242,7 @@ fn render_help(frame: &mut Frame<'_>) {
         Line::from("Tab markers: * recent output, . quiet after output, ! exited/failed."),
         Line::from(""),
         Line::from("Files: v opens selected file in an editor tab, e opens externally."),
+        Line::from("Files: ]/[ selects Markdown preview links, Enter opens the selected link."),
         Line::from("Esc, Enter, or q closes this help."),
     ];
     frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);
