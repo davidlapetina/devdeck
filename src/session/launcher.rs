@@ -2,11 +2,11 @@ use std::{env, path::Path};
 
 use crate::{config::TerminalProfile, session::CommandSpec};
 
-pub fn command_spec_from_profile(profile: &TerminalProfile, repo_root: &Path) -> CommandSpec {
+pub fn command_spec_from_profile(profile: &TerminalProfile, default_cwd: &Path) -> CommandSpec {
     let cwd = profile
         .cwd
         .clone()
-        .unwrap_or_else(|| repo_root.to_path_buf());
+        .unwrap_or_else(|| default_cwd.to_path_buf());
     let mut env_values = profile.env.clone();
     env_values.insert("TERM".to_string(), "xterm-256color".to_string());
     env_values.insert("COLORTERM".to_string(), "truecolor".to_string());

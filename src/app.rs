@@ -476,6 +476,19 @@ impl App {
             .unwrap_or_else(|| path.to_string_lossy().to_string())
     }
 
+    pub fn selected_working_directory(&self) -> PathBuf {
+        let Some(selected) = self.selected_path.as_deref() else {
+            return self.root_path.clone();
+        };
+        if selected.is_dir() {
+            return selected.to_path_buf();
+        }
+        selected
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.root_path.clone())
+    }
+
     pub fn stop_all_sessions(&mut self) {
         self.sessions.stop_all();
     }
@@ -999,7 +1012,10 @@ impl App {
 
     fn open_tab_launcher(&mut self) {
         self.confirm_tab = None;
-        self.launcher = TabLauncherState::default();
+        self.launcher = TabLauncherState {
+            cwd: self.relative_display(&self.selected_working_directory()),
+            ..Default::default()
+        };
         self.input_mode = InputMode::TabLauncher;
         self.set_status("New tab: enter name, Tab command/cwd, Enter launch, Esc cancel");
     }
@@ -1298,7 +1314,7 @@ impl App {
             terminal.state = TerminalTabState::Starting;
         }
 
-        let command = command_spec_from_profile(&profile, &self.root_path);
+        let command = self.command_spec_for_profile(&profile);
         match self.sessions.start(
             title,
             command.clone(),
@@ -1328,6 +1344,15 @@ impl App {
                 ));
             }
         }
+    }
+
+    fn command_spec_for_profile(&self, profile: &TerminalProfile) -> CommandSpec {
+        let default_cwd = if launches_from_selected_directory(profile) {
+            self.selected_working_directory()
+        } else {
+            self.root_path.clone()
+        };
+        command_spec_from_profile(profile, &default_cwd)
     }
 
     fn stop_or_close_active_terminal(&mut self) {
@@ -1913,6 +1938,24 @@ fn paths_related(selected: &Path, changed: &Path) -> bool {
     selected == changed || changed.starts_with(selected) || selected.starts_with(changed)
 }
 
+fn launches_from_selected_directory(profile: &TerminalProfile) -> bool {
+    if profile.cwd.is_some() {
+        return false;
+    }
+    is_codex_or_claude(&profile.name) || is_codex_or_claude(command_basename(&profile.command))
+}
+
+fn command_basename(command: &str) -> &str {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command)
+}
+
+fn is_codex_or_claude(value: &str) -> bool {
+    value.eq_ignore_ascii_case("codex") || value.eq_ignore_ascii_case("claude")
+}
+
 fn split_link_fragment(target: &str) -> (&str, Option<&str>) {
     target
         .split_once('#')
@@ -2280,6 +2323,74 @@ mod tests {
         assert_eq!(terminal.profile.command, "printf");
         assert_eq!(terminal.profile.args, ["hello"]);
         app.stop_all_sessions();
+    }
+
+    #[test]
+    fn launcher_prefills_cwd_from_selected_directory() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join("docs/guide.md"), "# Guide").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+
+        app.select_path(&root.join("docs/guide.md"), true);
+        app.open_tab_launcher();
+
+        assert_eq!(app.launcher.cwd, "docs");
+    }
+
+    #[test]
+    fn selected_working_directory_uses_selected_directory_or_file_parent() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join("docs/guide.md"), "# Guide").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        let docs = root.join("docs");
+
+        app.select_path(&docs, true);
+        assert_eq!(app.selected_working_directory(), docs);
+
+        app.select_path(&root.join("docs/guide.md"), true);
+        assert_eq!(app.selected_working_directory(), root.join("docs"));
+    }
+
+    #[test]
+    fn codex_and_claude_profiles_without_cwd_launch_from_selected_directory() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join("docs/guide.md"), "# Guide").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        app.select_path(&root.join("docs/guide.md"), true);
+
+        let mut codex = terminal_profile("Codex");
+        codex.command = "codex".to_string();
+        assert_eq!(app.command_spec_for_profile(&codex).cwd, root.join("docs"));
+
+        let mut claude = terminal_profile("AI");
+        claude.command = "/usr/local/bin/claude".to_string();
+        assert_eq!(app.command_spec_for_profile(&claude).cwd, root.join("docs"));
+
+        let shell = terminal_profile("Shell");
+        assert_eq!(app.command_spec_for_profile(&shell).cwd, root);
+    }
+
+    #[test]
+    fn explicit_agent_cwd_overrides_selected_directory() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::create_dir(temp.path().join("agent")).unwrap();
+        fs::write(temp.path().join("docs/guide.md"), "# Guide").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        app.select_path(&root.join("docs/guide.md"), true);
+
+        let mut codex = terminal_profile("Codex");
+        codex.command = "codex".to_string();
+        codex.cwd = Some(root.join("agent"));
+
+        assert_eq!(app.command_spec_for_profile(&codex).cwd, root.join("agent"));
     }
 
     #[test]

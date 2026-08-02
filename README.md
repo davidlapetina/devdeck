@@ -137,6 +137,7 @@ Expansion rules:
 
 - `~` and environment variables are expanded in `command`, `args`, `cwd`, and environment values.
 - Relative `cwd` values resolve against the repository root.
+- Claude and Codex profiles without an explicit `cwd` start in the current file-browser folder. If a file is selected, they start in that file's parent directory. Set `cwd` to pin them to a fixed directory.
 - Commands launch as executable plus argument vector, not through an implicit shell.
 - If a configured command is missing, its tab shows `Executable not found: <command>` and DevDeck keeps running.
 
@@ -169,7 +170,7 @@ v              Open selected file in a temporary editor tab
 r / R          Reload file/tree
 1..9           Select tab by position
 Tab / BackTab  Next/previous tab
-c              Create temporary command tab
+c              Create temporary command tab, prefilled with selected folder as cwd
 ?              Help overlay
 q              Quit with confirmation
 ```
