@@ -127,7 +127,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 }
 
 fn render_launcher(frame: &mut Frame<'_>, app: &App) {
-    let area = centered_rect(70, 45, frame.area());
+    let area = centered_rect(76, 58, frame.area());
     frame.render_widget(Clear, area);
     let block = Block::default()
         .title(" New Terminal Tab ")
@@ -143,33 +143,73 @@ fn render_launcher(frame: &mut Frame<'_>, app: &App) {
             Style::default()
         }
     };
-    let lines = vec![
+    let source_style = || {
+        if app.launcher.field == LauncherField::Source {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        }
+    };
+    let choices = app.launcher_choice_labels();
+    let mut lines = vec![Line::from(Span::styled("Source:", source_style()))];
+    lines.extend(choices.iter().enumerate().map(|(index, label)| {
+        let marker = if index == app.launcher.source_index {
+            "> "
+        } else {
+            "  "
+        };
+        let style = if index == app.launcher.source_index {
+            field_style(LauncherField::Source)
+        } else {
+            Style::default()
+        };
         Line::from(vec![
-            Span::raw("Name:    "),
-            Span::styled(app.launcher.name.clone(), field_style(LauncherField::Name)),
-        ]),
-        Line::from(vec![
-            Span::raw("Command: "),
-            Span::styled(
-                app.launcher.command.clone(),
-                field_style(LauncherField::Command),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("Cwd:     "),
-            Span::styled(app.launcher.cwd.clone(), field_style(LauncherField::Cwd)),
-        ]),
-        Line::from(""),
-        Line::from("Tab/Shift-Tab field | Enter launch | Esc cancel"),
-    ];
+            Span::raw("  "),
+            Span::styled(format!("{marker}{label}"), style),
+        ])
+    }));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("Name:    "),
+        Span::styled(app.launcher.name.clone(), field_style(LauncherField::Name)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("Command: "),
+        Span::styled(
+            app.launcher.command.clone(),
+            field_style(LauncherField::Command),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("Cwd:     "),
+        Span::styled(app.launcher.cwd.clone(), field_style(LauncherField::Cwd)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        "Tab/Shift-Tab field | Up/Down source | Enter launch | Esc cancel",
+    ));
     frame.render_widget(Paragraph::new(lines), inner);
 
+    let name_line = choices.len() as u16 + 2;
     match app.launcher.field {
-        LauncherField::Name => set_input_cursor(frame, inner, 0, "Name:    ", &app.launcher.name),
-        LauncherField::Command => {
-            set_input_cursor(frame, inner, 1, "Command: ", &app.launcher.command)
+        LauncherField::Source => {}
+        LauncherField::Name => {
+            set_input_cursor(frame, inner, name_line, "Name:    ", &app.launcher.name)
         }
-        LauncherField::Cwd => set_input_cursor(frame, inner, 2, "Cwd:     ", &app.launcher.cwd),
+        LauncherField::Command => set_input_cursor(
+            frame,
+            inner,
+            name_line.saturating_add(1),
+            "Command: ",
+            &app.launcher.command,
+        ),
+        LauncherField::Cwd => set_input_cursor(
+            frame,
+            inner,
+            name_line.saturating_add(2),
+            "Cwd:     ",
+            &app.launcher.cwd,
+        ),
     }
 }
 
@@ -221,7 +261,7 @@ fn render_help(frame: &mut Frame<'_>) {
         Line::from("Files and inactive terminal tabs"),
         Line::from("1..9          Select tab by number"),
         Line::from("Tab/BackTab   Next/previous tab"),
-        Line::from("c             New temporary command tab"),
+        Line::from("c             New terminal tab"),
         Line::from("?             Help"),
         Line::from("q             Quit with confirmation"),
         Line::from(""),
@@ -229,7 +269,7 @@ fn render_help(frame: &mut Frame<'_>) {
         Line::from("Ctrl-b 1..9   Select tab"),
         Line::from("Ctrl-b n/p    Next/previous tab"),
         Line::from("Ctrl-b f      Files tab"),
-        Line::from("Ctrl-b c      New temporary command tab"),
+        Line::from("Ctrl-b c      New terminal tab"),
         Line::from("Ctrl-b x      Stop or close current terminal tab"),
         Line::from("Ctrl-b r      Restart current terminal tab"),
         Line::from("Ctrl-b e      Reload configuration"),

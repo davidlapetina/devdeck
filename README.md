@@ -170,7 +170,7 @@ v              Open selected file in a temporary editor tab
 r / R          Reload file/tree
 1..9           Select tab by position
 Tab / BackTab  Next/previous tab
-c              Create temporary command tab, prefilled with selected folder as cwd
+c              Create temporary command tab from a known command, shell, or custom command
 ?              Help overlay
 q              Quit with confirmation
 ```
@@ -184,7 +184,7 @@ Ctrl-b 1..9     Select tab by position
 Ctrl-b n        Next tab
 Ctrl-b p        Previous tab
 Ctrl-b f        Select Files tab
-Ctrl-b c        Create temporary command tab
+Ctrl-b c        Create temporary command tab from a known command, shell, or custom command
 Ctrl-b x        Stop or close current terminal tab
 Ctrl-b r        Restart current terminal tab
 Ctrl-b e        Reload configuration
@@ -211,6 +211,15 @@ Tab activity markers:
 *               Inactive terminal tab has recent output
 .               Inactive terminal tab produced output, then went quiet
 !               Terminal process exited or failed
+```
+
+New tab launcher:
+
+```text
+Up / Down       Choose configured command, new shell, or custom command
+Tab / BackTab   Move between source, name, command, and cwd fields
+Enter           Launch temporary tab
+Esc             Cancel
 ```
 
 Prompt overlay:

@@ -17,7 +17,10 @@ use crate::{
     preview::{self, PreviewContent, PreviewState},
     pty::input::key_event_to_bytes,
     search::SearchState,
-    session::{launcher::command_spec_from_profile, CommandSpec, SessionId, SessionRegistry},
+    session::{
+        launcher::{command_spec_from_profile, parent_shell_profile},
+        CommandSpec, SessionId, SessionRegistry,
+    },
     tabs::{ActivityState, Tab, TabContent, TabId, TerminalTabState},
 };
 
@@ -58,13 +61,22 @@ pub struct TerminalDimensions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LauncherField {
+    Source,
     Name,
     Command,
     Cwd,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LauncherSource {
+    Profile(usize),
+    Shell,
+    Custom,
+}
+
 #[derive(Debug, Clone)]
 pub struct TabLauncherState {
+    pub source_index: usize,
     pub name: String,
     pub command: String,
     pub cwd: String,
@@ -74,10 +86,11 @@ pub struct TabLauncherState {
 impl Default for TabLauncherState {
     fn default() -> Self {
         Self {
+            source_index: 0,
             name: String::new(),
             command: String::new(),
             cwd: String::new(),
-            field: LauncherField::Name,
+            field: LauncherField::Source,
         }
     }
 }
@@ -463,6 +476,13 @@ impl App {
         self.status_set_at = Some(Instant::now());
     }
 
+    pub fn launcher_choice_labels(&self) -> Vec<String> {
+        self.launcher_sources()
+            .iter()
+            .map(|source| self.launcher_source_label(*source))
+            .collect()
+    }
+
     pub fn relative_display(&self, path: &Path) -> String {
         path.strip_prefix(&self.root_path)
             .ok()
@@ -714,10 +734,29 @@ impl App {
                 ..
             } => self.launcher.field = previous_launcher_field(self.launcher.field),
             KeyEvent {
+                code: KeyCode::Down,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if self.launcher.field == LauncherField::Source => self.adjust_launcher_source(1),
+            KeyEvent {
+                code: KeyCode::Up, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('k'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if self.launcher.field == LauncherField::Source => self.adjust_launcher_source(-1),
+            KeyEvent {
                 code: KeyCode::Backspace,
                 ..
             } => {
-                launcher_field_mut(&mut self.launcher).pop();
+                if let Some(field) = launcher_field_mut(&mut self.launcher) {
+                    field.pop();
+                }
             }
             KeyEvent {
                 code: KeyCode::Enter,
@@ -727,7 +766,11 @@ impl App {
                 code: KeyCode::Char(ch),
                 modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
                 ..
-            } => launcher_field_mut(&mut self.launcher).push(ch),
+            } => {
+                if let Some(field) = launcher_field_mut(&mut self.launcher) {
+                    field.push(ch);
+                }
+            }
             _ => {}
         }
     }
@@ -1016,8 +1059,9 @@ impl App {
             cwd: self.relative_display(&self.selected_working_directory()),
             ..Default::default()
         };
+        self.apply_launcher_source();
         self.input_mode = InputMode::TabLauncher;
-        self.set_status("New tab: enter name, Tab command/cwd, Enter launch, Esc cancel");
+        self.set_status("New tab: choose source, Tab fields, Enter launch, Esc cancel");
     }
 
     fn submit_launcher(&mut self, event_tx: &EventSender) {
@@ -1068,21 +1112,129 @@ impl App {
             Some(cwd)
         };
 
-        let profile = TerminalProfile {
-            name,
-            command,
-            args: parts,
-            cwd,
-            env: Default::default(),
-            auto_start: true,
-            restart_on_exit: false,
-        };
+        let mut profile = self.launcher_profile_template();
+        profile.name = name;
+        profile.command = command;
+        profile.args = parts;
+        profile.cwd = cwd;
+        profile.auto_start = true;
         let index = self.tabs.len();
         self.tabs
             .push(Tab::terminal_tab(TabId(self.next_tab_id), profile, true));
         self.next_tab_id += 1;
         self.input_mode = InputMode::Terminal;
         self.select_tab(index, event_tx);
+    }
+
+    fn launcher_sources(&self) -> Vec<LauncherSource> {
+        let mut sources = self
+            .tabs
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter_map(|(index, tab)| {
+                (!tab.temporary && tab.as_terminal().is_some())
+                    .then_some(LauncherSource::Profile(index))
+            })
+            .collect::<Vec<_>>();
+        sources.push(LauncherSource::Shell);
+        sources.push(LauncherSource::Custom);
+        sources
+    }
+
+    fn launcher_source_label(&self, source: LauncherSource) -> String {
+        match source {
+            LauncherSource::Profile(index) => self
+                .tabs
+                .get(index)
+                .and_then(Tab::as_terminal)
+                .map(|terminal| {
+                    format!(
+                        "{} - {}",
+                        terminal.profile.name,
+                        command_line_for_profile(&terminal.profile)
+                    )
+                })
+                .unwrap_or_else(|| "Configured command".to_string()),
+            LauncherSource::Shell => {
+                let profile = parent_shell_profile(&self.selected_working_directory());
+                format!("New shell - {}", command_line_for_profile(&profile))
+            }
+            LauncherSource::Custom => "Custom command".to_string(),
+        }
+    }
+
+    fn selected_launcher_source(&self) -> LauncherSource {
+        let sources = self.launcher_sources();
+        sources
+            .get(self.launcher.source_index)
+            .copied()
+            .unwrap_or(LauncherSource::Custom)
+    }
+
+    fn adjust_launcher_source(&mut self, delta: isize) {
+        let count = self.launcher_sources().len();
+        if count == 0 {
+            return;
+        }
+        let current = self.launcher.source_index.min(count - 1);
+        self.launcher.source_index = if delta.is_negative() {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            current.saturating_add(delta as usize).min(count - 1)
+        };
+        self.apply_launcher_source();
+    }
+
+    fn apply_launcher_source(&mut self) {
+        let source = self.selected_launcher_source();
+        let default_cwd = self.relative_display(&self.selected_working_directory());
+        match source {
+            LauncherSource::Profile(index) => {
+                if let Some(profile) = self
+                    .tabs
+                    .get(index)
+                    .and_then(Tab::as_terminal)
+                    .map(|terminal| terminal.profile.clone())
+                {
+                    self.launcher.name = self.unique_temporary_title(&profile.name);
+                    self.launcher.command = command_line_for_profile(&profile);
+                    self.launcher.cwd = profile
+                        .cwd
+                        .as_deref()
+                        .map(|cwd| self.relative_display(cwd))
+                        .unwrap_or(default_cwd);
+                }
+            }
+            LauncherSource::Shell => {
+                let profile = parent_shell_profile(&self.selected_working_directory());
+                self.launcher.name = self.unique_temporary_title(&profile.name);
+                self.launcher.command = command_line_for_profile(&profile);
+                self.launcher.cwd = profile
+                    .cwd
+                    .as_deref()
+                    .map(|cwd| self.relative_display(cwd))
+                    .unwrap_or(default_cwd);
+            }
+            LauncherSource::Custom => {
+                self.launcher.name.clear();
+                self.launcher.command.clear();
+                self.launcher.cwd = default_cwd;
+            }
+        }
+    }
+
+    fn launcher_profile_template(&self) -> TerminalProfile {
+        match self.selected_launcher_source() {
+            LauncherSource::Profile(index) => self
+                .tabs
+                .get(index)
+                .and_then(Tab::as_terminal)
+                .map(|terminal| terminal.profile.clone())
+                .unwrap_or_else(|| custom_launcher_profile(&self.root_path)),
+            LauncherSource::Shell => parent_shell_profile(&self.selected_working_directory()),
+            LauncherSource::Custom => custom_launcher_profile(&self.root_path),
+        }
     }
 
     fn open_rename_tab(&mut self) {
@@ -1956,6 +2108,25 @@ fn is_codex_or_claude(value: &str) -> bool {
     value.eq_ignore_ascii_case("codex") || value.eq_ignore_ascii_case("claude")
 }
 
+fn command_line_for_profile(profile: &TerminalProfile) -> String {
+    let mut words = Vec::with_capacity(profile.args.len() + 1);
+    words.push(profile.command.as_str());
+    words.extend(profile.args.iter().map(String::as_str));
+    shell_words::join(words)
+}
+
+fn custom_launcher_profile(root_path: &Path) -> TerminalProfile {
+    TerminalProfile {
+        name: String::new(),
+        command: String::new(),
+        args: Vec::new(),
+        cwd: Some(root_path.to_path_buf()),
+        env: Default::default(),
+        auto_start: true,
+        restart_on_exit: false,
+    }
+}
+
 fn split_link_fragment(target: &str) -> (&str, Option<&str>) {
     target
         .split_once('#')
@@ -2000,25 +2171,28 @@ fn is_ctrl_g(event: KeyEvent) -> bool {
 
 fn next_launcher_field(field: LauncherField) -> LauncherField {
     match field {
+        LauncherField::Source => LauncherField::Name,
         LauncherField::Name => LauncherField::Command,
         LauncherField::Command => LauncherField::Cwd,
-        LauncherField::Cwd => LauncherField::Name,
+        LauncherField::Cwd => LauncherField::Source,
     }
 }
 
 fn previous_launcher_field(field: LauncherField) -> LauncherField {
     match field {
-        LauncherField::Name => LauncherField::Cwd,
+        LauncherField::Source => LauncherField::Cwd,
+        LauncherField::Name => LauncherField::Source,
         LauncherField::Command => LauncherField::Name,
         LauncherField::Cwd => LauncherField::Command,
     }
 }
 
-fn launcher_field_mut(launcher: &mut TabLauncherState) -> &mut String {
+fn launcher_field_mut(launcher: &mut TabLauncherState) -> Option<&mut String> {
     match launcher.field {
-        LauncherField::Name => &mut launcher.name,
-        LauncherField::Command => &mut launcher.command,
-        LauncherField::Cwd => &mut launcher.cwd,
+        LauncherField::Source => None,
+        LauncherField::Name => Some(&mut launcher.name),
+        LauncherField::Command => Some(&mut launcher.command),
+        LauncherField::Cwd => Some(&mut launcher.cwd),
     }
 }
 
@@ -2322,6 +2496,68 @@ mod tests {
         let terminal = app.tabs[1].as_terminal().unwrap();
         assert_eq!(terminal.profile.command, "printf");
         assert_eq!(terminal.profile.args, ["hello"]);
+        app.stop_all_sessions();
+    }
+
+    #[test]
+    fn launcher_prefills_from_configured_profile_choice() {
+        let temp = TempDir::new().unwrap();
+        let mut env_values = HashMap::new();
+        env_values.insert("CODEX_HOME".to_string(), "/tmp/codex".to_string());
+        let mut app = App::new(
+            temp.path().to_path_buf(),
+            false,
+            false,
+            ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![TerminalProfile {
+                    name: "Codex".to_string(),
+                    command: "codex".to_string(),
+                    args: vec!["--full-auto".to_string()],
+                    cwd: None,
+                    env: env_values.clone(),
+                    auto_start: false,
+                    restart_on_exit: false,
+                }],
+            },
+        )
+        .unwrap();
+
+        app.open_tab_launcher();
+
+        assert_eq!(app.launcher_choice_labels()[0], "Codex - codex --full-auto");
+        assert_eq!(app.launcher.name, "Codex (2)");
+        assert_eq!(app.launcher.command, "codex --full-auto");
+
+        let (tx, _rx) = crate::event::channel();
+        app.submit_launcher(&tx);
+
+        assert_eq!(app.tabs.len(), 3);
+        assert_eq!(app.tabs[2].title, "Codex (2)");
+        assert!(app.tabs[2].temporary);
+        let terminal = app.tabs[2].as_terminal().unwrap();
+        assert_eq!(terminal.profile.command, "codex");
+        assert_eq!(terminal.profile.args, ["--full-auto"]);
+        assert_eq!(terminal.profile.env, env_values);
+        app.stop_all_sessions();
+    }
+
+    #[test]
+    fn launcher_can_create_new_shell_choice() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        let expected = parent_shell_profile(&app.selected_working_directory());
+        let (tx, _rx) = crate::event::channel();
+
+        app.open_tab_launcher();
+        app.submit_launcher(&tx);
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[1].title, "Shell");
+        assert!(app.tabs[1].temporary);
+        let terminal = app.tabs[1].as_terminal().unwrap();
+        assert_eq!(terminal.profile.command, expected.command);
+        assert_eq!(terminal.profile.args, expected.args);
         app.stop_all_sessions();
     }
 
