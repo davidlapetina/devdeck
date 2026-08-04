@@ -21,6 +21,7 @@ Interactive Git tab running `lazygit` inside DevDeck:
 - Independent preview scrolling and automatic refresh on filesystem changes
 - Filename search
 - Relative and absolute path copying
+- File and folder actions for renaming, filename/path copying, command launch, and agent launch
 - External file opening
 - Temporary in-DevDeck editor tabs
 - Configurable terminal tabs for arbitrary commands
@@ -165,6 +166,7 @@ J / K          Preview line down/up
 0 / $          Preview top/bottom
 ] / [          Next/previous Markdown preview link
 y / Y          Copy relative/absolute path
+a              File actions: rename, copy name/path, run command, run configured agent
 e              Open externally
 v              Open selected file in a temporary editor tab
 r / R          Reload file/tree
@@ -219,6 +221,19 @@ New tab launcher:
 Up / Down       Choose configured command, new shell, or custom command
 Tab / BackTab   Move between source, name, command, and cwd fields
 Enter           Launch temporary tab
+Esc             Cancel
+```
+
+File actions:
+
+```text
+a               Open file actions for the selected file or folder
+r               Rename selected file or folder
+n               Copy selected file/folder name
+y / Y           Copy relative/absolute path
+!               Run a command with the selected path appended as the final argument
+g               Run a configured Codex or Claude agent with a prompt for the selected path
+v               Open selected file in a temporary editor tab
 Esc             Cancel
 ```
 

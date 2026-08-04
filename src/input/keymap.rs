@@ -29,6 +29,7 @@ pub enum KeyAction {
     OpenOs,
     CopyRelative,
     CopyAbsolute,
+    FileActions,
     CtrlC,
 }
 
@@ -195,6 +196,11 @@ pub fn map_key(event: KeyEvent) -> Option<KeyAction> {
             modifiers: KeyModifiers::SHIFT,
             ..
         } => Some(KeyAction::CopyAbsolute),
+        KeyEvent {
+            code: KeyCode::Char('a'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => Some(KeyAction::FileActions),
         _ => None,
     }
 }

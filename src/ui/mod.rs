@@ -38,6 +38,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     match app.input_mode {
         InputMode::TabLauncher => render_launcher(frame, app),
         InputMode::RenameTab => render_rename(frame, app),
+        InputMode::RenamePath => render_rename(frame, app),
+        InputMode::FileActions => render_file_actions(frame, app),
         InputMode::ConfirmStop => {
             render_confirm(frame, "Stop terminal?", "Enter/y stop | Esc/n cancel")
         }
@@ -49,6 +51,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         InputMode::Help => render_help(frame),
         InputMode::PromptOverlay => render_prompt(frame, app),
+        InputMode::AgentPrompt => render_agent_prompt(frame, app),
         InputMode::Repository | InputMode::Terminal | InputMode::CommandPrefix => {}
     }
 }
@@ -129,8 +132,13 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 fn render_launcher(frame: &mut Frame<'_>, app: &App) {
     let area = centered_rect(76, 58, frame.area());
     frame.render_widget(Clear, area);
+    let title = if app.launcher_selected_path_parameter().is_some() {
+        " Run Command For Selection "
+    } else {
+        " New Terminal Tab "
+    };
     let block = Block::default()
-        .title(" New Terminal Tab ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
     let inner = block.inner(area);
@@ -184,6 +192,12 @@ fn render_launcher(frame: &mut Frame<'_>, app: &App) {
         Span::raw("Cwd:     "),
         Span::styled(app.launcher.cwd.clone(), field_style(LauncherField::Cwd)),
     ]));
+    if let Some(parameter) = app.launcher_selected_path_parameter() {
+        lines.push(Line::from(vec![
+            Span::raw("Arg:     "),
+            Span::styled(parameter, Style::default().fg(Color::Cyan)),
+        ]));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(
         "Tab/Shift-Tab field | Up/Down source | Enter launch | Esc cancel",
@@ -213,11 +227,43 @@ fn render_launcher(frame: &mut Frame<'_>, app: &App) {
     }
 }
 
+fn render_file_actions(frame: &mut Frame<'_>, app: &App) {
+    let area = centered_rect(56, 32, frame.area());
+    frame.render_widget(Clear, area);
+    let title = app
+        .selected_path()
+        .map(|path| format!(" Actions: {} ", app.relative_display(path)))
+        .unwrap_or_else(|| " File Actions ".to_string());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let text = vec![
+        Line::from("r   Rename"),
+        Line::from("n   Copy file/folder name"),
+        Line::from("y   Copy relative path"),
+        Line::from("Y   Copy absolute path"),
+        Line::from("!   Run command with selected path argument"),
+        Line::from("g   Run configured agent with prompt"),
+        Line::from("v   Open file in editor tab"),
+        Line::from(""),
+        Line::from("Esc cancel"),
+    ];
+    frame.render_widget(Paragraph::new(text), inner);
+}
+
 fn render_rename(frame: &mut Frame<'_>, app: &App) {
     let area = centered_rect(55, 25, frame.area());
     frame.render_widget(Clear, area);
+    let title = if app.input_mode == InputMode::RenamePath {
+        " Rename File "
+    } else {
+        " Rename Tab "
+    };
     let block = Block::default()
-        .title(" Rename Tab ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
     let inner = block.inner(area);
@@ -282,6 +328,7 @@ fn render_help(frame: &mut Frame<'_>) {
         Line::from("Tab markers: * recent output, . quiet after output, ! exited/failed."),
         Line::from(""),
         Line::from("Files: v opens selected file in an editor tab, e opens externally."),
+        Line::from("Files: a opens file actions for rename, path copy, command, and agent launch."),
         Line::from("Files: ]/[ selects Markdown preview links, Enter opens the selected link."),
         Line::from("Esc, Enter, or q closes this help."),
     ];
@@ -319,6 +366,80 @@ fn render_prompt(frame: &mut Frame<'_>, app: &App) {
         chunks[2],
     );
     set_multiline_input_cursor(frame, chunks[0], &app.prompt.text);
+}
+
+fn render_agent_prompt(frame: &mut Frame<'_>, app: &App) {
+    let area = centered_rect(76, 58, frame.area());
+    frame.render_widget(Clear, area);
+    let title = app
+        .selected_path()
+        .map(|path| format!(" Agent For {} ", app.relative_display(path)))
+        .unwrap_or_else(|| " Agent Prompt ".to_string());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let choices = app.agent_choice_labels();
+    let choices_height = choices.len() as u16 + 2;
+    let prompt_height = inner
+        .height
+        .saturating_sub(choices_height)
+        .saturating_sub(2);
+    let chunks = Layout::vertical([
+        Constraint::Length(choices_height),
+        Constraint::Length(prompt_height.max(3)),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+
+    let mut lines = vec![Line::from(Span::styled(
+        "Agent:",
+        Style::default().fg(Color::Yellow),
+    ))];
+    lines.extend(choices.iter().enumerate().map(|(index, label)| {
+        let marker = if index == app.agent_prompt.source_index {
+            "> "
+        } else {
+            "  "
+        };
+        let style = if index == app.agent_prompt.source_index {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{marker}{label}"), style),
+        ])
+    }));
+    frame.render_widget(Paragraph::new(lines), chunks[0]);
+
+    let prompt_lines = app
+        .agent_prompt
+        .text
+        .split('\n')
+        .map(|line| Line::from(line.to_string()))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(prompt_lines)
+            .block(Block::default().title(" Prompt ").borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new("Up/Down agent | Enter launch | Alt-Enter newline | Esc cancel"),
+        chunks[2],
+    );
+    let prompt_inner = Rect::new(
+        chunks[1].x.saturating_add(1),
+        chunks[1].y.saturating_add(1),
+        chunks[1].width.saturating_sub(2),
+        chunks[1].height.saturating_sub(2),
+    );
+    set_multiline_input_cursor(frame, prompt_inner, &app.agent_prompt.text);
 }
 
 fn set_input_cursor(frame: &mut Frame<'_>, area: Rect, line: u16, prefix: &str, value: &str) {

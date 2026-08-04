@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    env,
+    env, fs,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -46,11 +46,14 @@ pub enum InputMode {
     CommandPrefix,
     TabLauncher,
     RenameTab,
+    RenamePath,
+    FileActions,
     ConfirmStop,
     ConfirmRestart,
     ConfirmQuit,
     Help,
     PromptOverlay,
+    AgentPrompt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +84,7 @@ pub struct TabLauncherState {
     pub command: String,
     pub cwd: String,
     pub field: LauncherField,
+    pub intent: LauncherIntent,
 }
 
 impl Default for TabLauncherState {
@@ -91,17 +95,43 @@ impl Default for TabLauncherState {
             command: String::new(),
             cwd: String::new(),
             field: LauncherField::Source,
+            intent: LauncherIntent::NewTab,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LauncherIntent {
+    NewTab,
+    WithSelectedPath { path: PathBuf },
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct RenameState {
     pub value: String,
+    pub target: RenameTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameTarget {
+    Tab,
+    Path(PathBuf),
+}
+
+impl Default for RenameTarget {
+    fn default() -> Self {
+        Self::Tab
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct PromptState {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentPromptState {
+    pub source_index: usize,
     pub text: String,
 }
 
@@ -135,6 +165,7 @@ pub struct App {
     pub launcher: TabLauncherState,
     pub rename: RenameState,
     pub prompt: PromptState,
+    pub agent_prompt: AgentPromptState,
     pub status_message: Option<String>,
     pub should_quit: bool,
     next_tab_id: u64,
@@ -197,6 +228,7 @@ impl App {
             launcher: TabLauncherState::default(),
             rename: RenameState::default(),
             prompt: PromptState::default(),
+            agent_prompt: AgentPromptState::default(),
             status_message: None,
             should_quit: false,
             next_tab_id,
@@ -245,6 +277,14 @@ impl App {
                 self.handle_rename_key(event);
                 return None;
             }
+            InputMode::RenamePath => {
+                self.handle_rename_key(event);
+                return None;
+            }
+            InputMode::FileActions => {
+                self.handle_file_actions_key(event, event_tx);
+                return None;
+            }
             InputMode::ConfirmStop => {
                 self.handle_confirm_stop_key(event);
                 return None;
@@ -268,6 +308,10 @@ impl App {
             }
             InputMode::PromptOverlay => {
                 self.handle_prompt_key(event);
+                return None;
+            }
+            InputMode::AgentPrompt => {
+                self.handle_agent_prompt_key(event, event_tx);
                 return None;
             }
             InputMode::Repository | InputMode::Terminal => {}
@@ -568,6 +612,7 @@ impl App {
             KeyAction::OpenOs => return Some(ExternalOpen::OperatingSystem),
             KeyAction::CopyRelative => self.copy_selected_path(false),
             KeyAction::CopyAbsolute => self.copy_selected_path(true),
+            KeyAction::FileActions => self.open_file_actions(),
         }
 
         None
@@ -792,13 +837,62 @@ impl App {
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
-            } => self.submit_rename(),
+            } => match self.input_mode {
+                InputMode::RenamePath => self.submit_path_rename(),
+                _ => self.submit_tab_rename(),
+            },
             KeyEvent {
                 code: KeyCode::Char(ch),
                 modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
                 ..
             } => self.rename.value.push(ch),
             _ => {}
+        }
+    }
+
+    fn handle_file_actions_key(&mut self, event: KeyEvent, event_tx: &EventSender) {
+        self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+
+        match event {
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } => self.set_status("File action cancelled"),
+            KeyEvent {
+                code: KeyCode::Char('r'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.open_rename_path(),
+            KeyEvent {
+                code: KeyCode::Char('n'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.copy_selected_name(),
+            KeyEvent {
+                code: KeyCode::Char('y'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.copy_selected_path(false),
+            KeyEvent {
+                code: KeyCode::Char('Y'),
+                modifiers: KeyModifiers::SHIFT,
+                ..
+            } => self.copy_selected_path(true),
+            KeyEvent {
+                code: KeyCode::Char('!'),
+                modifiers: KeyModifiers::SHIFT,
+                ..
+            } => self.open_selected_path_launcher(),
+            KeyEvent {
+                code: KeyCode::Char('g'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.open_agent_prompt(),
+            KeyEvent {
+                code: KeyCode::Char('v'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.open_selected_file_in_terminal_editor(event_tx),
+            _ => self.set_status("Unknown file action"),
         }
     }
 
@@ -831,6 +925,56 @@ impl App {
                 modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
                 ..
             } => self.prompt.text.push(ch),
+            _ => {}
+        }
+    }
+
+    fn handle_agent_prompt_key(&mut self, event: KeyEvent, event_tx: &EventSender) {
+        match event {
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } => {
+                self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+                self.agent_prompt.text.clear();
+                self.set_status("Agent prompt cancelled");
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.adjust_agent_source(1),
+            KeyEvent {
+                code: KeyCode::Up, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('k'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.adjust_agent_source(-1),
+            KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            } => {
+                self.agent_prompt.text.pop();
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::ALT) => self.agent_prompt.text.push('\n'),
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => self.submit_agent_prompt(event_tx),
+            KeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+                ..
+            } => self.agent_prompt.text.push(ch),
             _ => {}
         }
     }
@@ -1057,6 +1201,7 @@ impl App {
         self.confirm_tab = None;
         self.launcher = TabLauncherState {
             cwd: self.relative_display(&self.selected_working_directory()),
+            intent: LauncherIntent::NewTab,
             ..Default::default()
         };
         self.apply_launcher_source();
@@ -1095,6 +1240,9 @@ impl App {
             }
         };
         let command = parts.remove(0);
+        if let LauncherIntent::WithSelectedPath { path } = &self.launcher.intent {
+            parts.push(path.to_string_lossy().to_string());
+        }
         let cwd = if self.launcher.cwd.trim().is_empty() {
             Some(self.root_path.clone())
         } else {
@@ -1124,6 +1272,13 @@ impl App {
         self.next_tab_id += 1;
         self.input_mode = InputMode::Terminal;
         self.select_tab(index, event_tx);
+    }
+
+    pub fn launcher_selected_path_parameter(&self) -> Option<String> {
+        match &self.launcher.intent {
+            LauncherIntent::NewTab => None,
+            LauncherIntent::WithSelectedPath { path } => Some(self.relative_display(path)),
+        }
     }
 
     fn launcher_sources(&self) -> Vec<LauncherSource> {
@@ -1237,6 +1392,34 @@ impl App {
         }
     }
 
+    fn open_file_actions(&mut self) {
+        if self.selected_path.is_none() {
+            self.set_status("No file selected");
+            return;
+        }
+        self.input_mode = InputMode::FileActions;
+        self.set_status("File actions: r rename | n copy name | y/Y copy path | ! command | g agent | Esc cancel");
+    }
+
+    fn open_rename_path(&mut self) {
+        let Some(path) = self.selected_path.clone() else {
+            self.set_status("No file selected");
+            return;
+        };
+        if path == self.root_path {
+            self.set_status("Explorer root cannot be renamed");
+            return;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            self.set_status("Selected path cannot be renamed");
+            return;
+        };
+        self.rename.value = name.to_string();
+        self.rename.target = RenameTarget::Path(path);
+        self.input_mode = InputMode::RenamePath;
+        self.set_status("Rename file: Enter save, Esc cancel");
+    }
+
     fn open_rename_tab(&mut self) {
         if self.active_tab == 0 {
             self.set_status("Files tab cannot be renamed");
@@ -1247,11 +1430,12 @@ impl App {
             return;
         }
         self.rename.value = self.tabs[self.active_tab].title.clone();
+        self.rename.target = RenameTarget::Tab;
         self.input_mode = InputMode::RenameTab;
         self.set_status("Rename tab: Enter save, Esc cancel");
     }
 
-    fn submit_rename(&mut self) {
+    fn submit_tab_rename(&mut self) {
         let name = self.rename.value.trim().to_string();
         if name.is_empty() {
             self.set_status("Tab name cannot be empty");
@@ -1272,6 +1456,171 @@ impl App {
         }
         self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
         self.set_status("Tab renamed");
+    }
+
+    fn submit_path_rename(&mut self) {
+        let RenameTarget::Path(path) = self.rename.target.clone() else {
+            self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+            self.set_status("No path selected for rename");
+            return;
+        };
+        let name = self.rename.value.trim().to_string();
+        if name.is_empty() {
+            self.set_status("File name cannot be empty");
+            return;
+        }
+        if name.contains('/') || name.contains('\\') {
+            self.set_status("Rename cannot include path separators");
+            return;
+        }
+        if path == self.root_path {
+            self.set_status("Explorer root cannot be renamed");
+            return;
+        }
+        let Some(parent) = path.parent() else {
+            self.set_status("Selected path cannot be renamed");
+            return;
+        };
+        let new_path = parent.join(&name);
+        if new_path == path {
+            self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+            self.set_status("Name unchanged");
+            return;
+        }
+        if new_path.exists() {
+            self.set_status(format!(
+                "Path already exists: {}",
+                self.relative_display(&new_path)
+            ));
+            return;
+        }
+
+        let was_expanded_directory = self.expanded_directories.contains(&path);
+
+        match fs::rename(&path, &new_path) {
+            Ok(()) => {
+                if was_expanded_directory {
+                    self.expanded_directories.insert(new_path.clone());
+                }
+                self.selected_path = Some(new_path.clone());
+                self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+                self.reload_tree_preserving_selection();
+                self.select_path(&new_path, true);
+                self.rename = RenameState::default();
+                self.set_status(format!("Renamed: {}", self.relative_display(&new_path)));
+            }
+            Err(error) => self.set_status(format!("Rename failed: {error}")),
+        }
+    }
+
+    fn open_selected_path_launcher(&mut self) {
+        let Some(path) = self.selected_path.clone() else {
+            self.set_status("No file selected");
+            return;
+        };
+        let base = selected_action_name(&path, "Run");
+        let custom_index = self.launcher_sources().len().saturating_sub(1);
+        self.launcher = TabLauncherState {
+            source_index: custom_index,
+            cwd: self.relative_display(&self.root_path),
+            intent: LauncherIntent::WithSelectedPath { path },
+            ..Default::default()
+        };
+        self.apply_launcher_source();
+        self.launcher.name = self.unique_temporary_title(&base);
+        self.launcher.field = LauncherField::Command;
+        self.input_mode = InputMode::TabLauncher;
+        self.set_status(
+            "Command action: enter command; selected path is appended as the final argument",
+        );
+    }
+
+    pub fn agent_choice_labels(&self) -> Vec<String> {
+        self.agent_profile_indices()
+            .iter()
+            .filter_map(|index| {
+                self.tabs
+                    .get(*index)
+                    .and_then(Tab::as_terminal)
+                    .map(|terminal| {
+                        format!(
+                            "{} - {}",
+                            terminal.profile.name,
+                            command_line_for_profile(&terminal.profile)
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    fn open_agent_prompt(&mut self) {
+        if self.selected_path.is_none() {
+            self.set_status("No file selected");
+            return;
+        }
+        if self.agent_profile_indices().is_empty() {
+            self.set_status("No configured Codex or Claude agent profile");
+            return;
+        }
+        self.agent_prompt = AgentPromptState::default();
+        self.input_mode = InputMode::AgentPrompt;
+        self.set_status("Agent prompt: Up/Down agent, Enter launch, Alt-Enter newline, Esc cancel");
+    }
+
+    fn adjust_agent_source(&mut self, delta: isize) {
+        let count = self.agent_profile_indices().len();
+        if count == 0 {
+            return;
+        }
+        let current = self.agent_prompt.source_index.min(count - 1);
+        self.agent_prompt.source_index = if delta.is_negative() {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            current.saturating_add(delta as usize).min(count - 1)
+        };
+    }
+
+    fn submit_agent_prompt(&mut self, event_tx: &EventSender) {
+        let Some(path) = self.selected_path.clone() else {
+            self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+            self.set_status("No file selected");
+            return;
+        };
+        let text = self.agent_prompt.text.trim().to_string();
+        if text.is_empty() {
+            self.set_status("Prompt cannot be empty");
+            return;
+        }
+        let agent_indices = self.agent_profile_indices();
+        let Some(profile_index) = agent_indices.get(self.agent_prompt.source_index).copied() else {
+            self.set_status("No configured Codex or Claude agent profile");
+            return;
+        };
+        let Some(mut profile) = self
+            .tabs
+            .get(profile_index)
+            .and_then(Tab::as_terminal)
+            .map(|terminal| terminal.profile.clone())
+        else {
+            self.set_status("Agent profile is unavailable");
+            return;
+        };
+
+        let relative_path = self.relative_display(&path);
+        let prompt = format!("Selected path: {relative_path}\n\n{text}");
+        profile.name = self.unique_temporary_title(&selected_action_name(&path, &profile.name));
+        profile.args.push(prompt);
+        profile.cwd = Some(self.selected_working_directory());
+        profile.auto_start = true;
+        profile.restart_on_exit = false;
+
+        let index = self.tabs.len();
+        self.tabs
+            .push(Tab::terminal_tab(TabId(self.next_tab_id), profile, true));
+        self.next_tab_id += 1;
+        self.agent_prompt = AgentPromptState::default();
+        self.input_mode = InputMode::Terminal;
+        self.select_tab(index, event_tx);
     }
 
     fn open_prompt_overlay(&mut self) {
@@ -1968,6 +2317,30 @@ impl App {
         }
     }
 
+    fn copy_selected_name(&mut self) {
+        let Some(path) = self.selected_path.clone() else {
+            self.set_status("No file selected");
+            return;
+        };
+        let value = if path == self.root_path {
+            ".".to_string()
+        } else {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        if value.is_empty() {
+            self.set_status("Selected path has no file name");
+            return;
+        }
+
+        match Clipboard::new().and_then(|mut clipboard| clipboard.set_text(value.clone())) {
+            Ok(()) => self.set_status(format!("Copied name: {value}")),
+            Err(error) => self.set_status(format!("Clipboard unavailable: {error}")),
+        }
+    }
+
     fn reload_selected_preview(&mut self, preserve_scroll: bool) {
         let Some(path) = self.selected_path.clone() else {
             return;
@@ -2026,6 +2399,24 @@ impl App {
             .visible_entries
             .get(self.selected_index)
             .map(|entry| entry.path.clone());
+    }
+
+    fn agent_profile_indices(&self) -> Vec<usize> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter_map(|(index, tab)| {
+                if tab.temporary {
+                    return None;
+                }
+                let terminal = tab.as_terminal()?;
+                let name_matches = is_codex_or_claude(&terminal.profile.name);
+                let command_matches =
+                    is_codex_or_claude(command_basename(&terminal.profile.command));
+                (name_matches || command_matches).then_some(index)
+            })
+            .collect()
     }
 }
 
@@ -2125,6 +2516,14 @@ fn custom_launcher_profile(root_path: &Path) -> TerminalProfile {
         auto_start: true,
         restart_on_exit: false,
     }
+}
+
+fn selected_action_name(path: &Path, prefix: &str) -> String {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("root");
+    format!("{prefix} {name}")
 }
 
 fn split_link_fragment(target: &str) -> (&str, Option<&str>) {
@@ -2500,6 +2899,53 @@ mod tests {
     }
 
     #[test]
+    fn file_rename_changes_filesystem_and_selection() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join("docs/guide.md"), "# Guide").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        app.select_path(&root.join("docs/guide.md"), true);
+
+        app.open_rename_path();
+        app.rename.value = "renamed.md".to_string();
+        app.submit_path_rename();
+
+        assert!(!root.join("docs/guide.md").exists());
+        assert!(root.join("docs/renamed.md").exists());
+        assert_eq!(
+            app.selected_path(),
+            Some(root.join("docs/renamed.md").as_path())
+        );
+        assert_eq!(app.input_mode, InputMode::Repository);
+    }
+
+    #[test]
+    fn selected_path_launcher_appends_absolute_path_argument() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("input.txt"), "data").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        app.select_path(&root.join("input.txt"), true);
+        let (tx, _rx) = crate::event::channel();
+
+        app.open_selected_path_launcher();
+        app.launcher.command = "printf %s".to_string();
+        app.submit_launcher(&tx);
+
+        let terminal = app.tabs[1].as_terminal().unwrap();
+        assert_eq!(terminal.profile.command, "printf");
+        assert_eq!(
+            terminal.profile.args,
+            [
+                "%s".to_string(),
+                root.join("input.txt").to_string_lossy().to_string()
+            ]
+        );
+        app.stop_all_sessions();
+    }
+
+    #[test]
     fn launcher_prefills_from_configured_profile_choice() {
         let temp = TempDir::new().unwrap();
         let mut env_values = HashMap::new();
@@ -2630,6 +3076,55 @@ mod tests {
     }
 
     #[test]
+    fn agent_prompt_creates_temporary_tab_from_configured_agent() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join("docs/guide.md"), "# Guide").unwrap();
+        let mut app = App::new(
+            temp.path().to_path_buf(),
+            false,
+            false,
+            ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![
+                    terminal_profile("Shell"),
+                    TerminalProfile {
+                        name: "Codex".to_string(),
+                        command: "devdeck-missing-command-for-test".to_string(),
+                        args: vec!["--full-auto".to_string()],
+                        cwd: None,
+                        env: HashMap::new(),
+                        auto_start: false,
+                        restart_on_exit: false,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        app.select_path(&root.join("docs/guide.md"), true);
+        let (tx, _rx) = crate::event::channel();
+
+        app.open_agent_prompt();
+        app.agent_prompt.text = "Summarize this file".to_string();
+        app.submit_agent_prompt(&tx);
+
+        assert_eq!(app.tabs.len(), 4);
+        assert_eq!(app.active_tab, 3);
+        assert!(app.tabs[3].temporary);
+        let terminal = app.tabs[3].as_terminal().unwrap();
+        assert_eq!(terminal.profile.command, "devdeck-missing-command-for-test");
+        assert_eq!(terminal.profile.args.len(), 2);
+        assert_eq!(terminal.profile.args[0], "--full-auto");
+        assert_eq!(
+            terminal.profile.args[1],
+            "Selected path: docs/guide.md\n\nSummarize this file"
+        );
+        assert_eq!(terminal.profile.cwd, Some(root.join("docs")));
+        app.stop_all_sessions();
+    }
+
+    #[test]
     fn inactive_terminal_output_marks_active_then_quiet() {
         let temp = TempDir::new().unwrap();
         let mut app = app(&temp);
@@ -2712,7 +3207,7 @@ mod tests {
 
         app.open_rename_tab();
         app.rename.value = "Renamed".to_string();
-        app.submit_rename();
+        app.submit_tab_rename();
 
         assert_eq!(app.tabs[1].title, "Renamed");
         assert_eq!(app.tabs[1].as_terminal().unwrap().profile.name, "Renamed");
