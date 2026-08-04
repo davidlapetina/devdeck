@@ -6,7 +6,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use crate::{
     event::EventSender,
     pty::reader,
-    session::{CommandSpec, ProcessStatus, SessionId, TerminalSession},
+    session::{CommandSpec, ProcessStatus, SessionId, TerminalPromptState, TerminalSession},
 };
 
 pub fn spawn_session(
@@ -55,6 +55,7 @@ pub fn spawn_session(
         last_activity: Some(Instant::now()),
         reader_thread: Some(reader_thread),
         bracketed_paste_enabled: false,
+        prompt_state: TerminalPromptState::Unknown,
         output_tail: Vec::new(),
     })
 }

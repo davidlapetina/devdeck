@@ -20,6 +20,13 @@ pub enum ProcessStatus {
     Failed { message: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalPromptState {
+    Unknown,
+    AtPrompt,
+    CommandRunning,
+}
+
 pub struct TerminalSession {
     pub id: SessionId,
     pub title: String,
@@ -35,5 +42,6 @@ pub struct TerminalSession {
     pub last_activity: Option<Instant>,
     pub reader_thread: Option<JoinHandle<()>>,
     pub bracketed_paste_enabled: bool,
+    pub prompt_state: TerminalPromptState,
     pub output_tail: Vec<u8>,
 }

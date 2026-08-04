@@ -325,7 +325,9 @@ fn render_help(frame: &mut Frame<'_>) {
         Line::from("Ctrl-b Ctrl-b Send literal Ctrl-b"),
         Line::from("Ctrl-g        Prompt overlay for active terminal"),
         Line::from(""),
-        Line::from("Tab markers: * recent output, . quiet after output, ! exited/failed."),
+        Line::from(
+            "Tab markers: > shell prompt, * recent output, . quiet output, ! exited/failed.",
+        ),
         Line::from(""),
         Line::from("Files: v opens selected file in an editor tab, e opens externally."),
         Line::from("Files: a opens file actions for rename, path copy, command, and agent launch."),

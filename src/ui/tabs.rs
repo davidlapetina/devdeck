@@ -2,6 +2,7 @@ use ratatui::{prelude::*, widgets::*};
 
 use crate::{
     app::App,
+    session::TerminalPromptState,
     tabs::{ActivityState, TabContent, TerminalTabState},
 };
 
@@ -29,6 +30,16 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ) =>
             {
                 "!"
+            }
+            TabContent::Terminal(terminal)
+                if terminal
+                    .session_id
+                    .and_then(|session_id| app.sessions.session(session_id))
+                    .is_some_and(|session| {
+                        session.prompt_state == TerminalPromptState::AtPrompt
+                    }) =>
+            {
+                ">"
             }
             TabContent::Terminal(_) => "",
         };
