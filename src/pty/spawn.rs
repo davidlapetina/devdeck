@@ -54,5 +54,7 @@ pub fn spawn_session(
         pid,
         last_activity: Some(Instant::now()),
         reader_thread: Some(reader_thread),
+        bracketed_paste_enabled: false,
+        output_tail: Vec::new(),
     })
 }

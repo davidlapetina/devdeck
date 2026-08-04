@@ -1,5 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
 pub fn key_event_to_bytes(event: KeyEvent) -> Option<Vec<u8>> {
     let modifiers = event.modifiers;
     match event.code {
@@ -33,6 +36,34 @@ pub fn key_event_to_bytes(event: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::F(number) => function_key(number),
         _ => None,
     }
+}
+
+pub fn paste_text_to_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let text = normalize_paste_newlines(text);
+    if bracketed {
+        let mut bytes = Vec::with_capacity(
+            BRACKETED_PASTE_START.len() + text.len() + BRACKETED_PASTE_END.len(),
+        );
+        bytes.extend_from_slice(BRACKETED_PASTE_START);
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(BRACKETED_PASTE_END);
+        return bytes;
+    }
+
+    let mut bytes = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch == '\n' {
+            bytes.push(b'\r');
+        } else {
+            let mut encoded = [0; 4];
+            bytes.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+        }
+    }
+    bytes
+}
+
+pub fn normalize_paste_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn ctrl_char(ch: char) -> Option<u8> {
@@ -114,6 +145,22 @@ mod tests {
         assert_eq!(
             key_event_to_bytes(key(KeyCode::PageDown, KeyModifiers::NONE)),
             Some(b"\x1b[6~".to_vec())
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_wraps_text_and_preserves_line_feeds() {
+        assert_eq!(
+            paste_text_to_bytes("first\r\nsecond\rthird", true),
+            b"\x1b[200~first\nsecond\nthird\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn plain_paste_preserves_legacy_enter_behavior() {
+        assert_eq!(
+            paste_text_to_bytes("first\r\nsecond", false),
+            b"first\rsecond".to_vec()
         );
     }
 }

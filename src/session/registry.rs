@@ -8,6 +8,10 @@ use crate::{
     session::{lifecycle, CommandSpec, ProcessStatus, SessionId, TerminalSession},
 };
 
+const BRACKETED_PASTE_ENABLE: &[u8] = b"\x1b[?2004h";
+const BRACKETED_PASTE_DISABLE: &[u8] = b"\x1b[?2004l";
+const OUTPUT_TAIL_LIMIT: usize = 32;
+
 #[derive(Default)]
 pub struct SessionRegistry {
     sessions: HashMap<SessionId, TerminalSession>,
@@ -49,6 +53,7 @@ impl SessionRegistry {
 
     pub fn handle_output(&mut self, id: SessionId, bytes: &[u8]) {
         if let Some(session) = self.sessions.get_mut(&id) {
+            update_bracketed_paste_mode(session, bytes);
             session.terminal.process(bytes);
             session.last_activity = Some(Instant::now());
         }
@@ -113,6 +118,30 @@ impl SessionRegistry {
             self.sessions.remove(&id);
         }
     }
+}
+
+fn update_bracketed_paste_mode(session: &mut TerminalSession, bytes: &[u8]) {
+    let mut combined = Vec::with_capacity(session.output_tail.len() + bytes.len());
+    combined.extend_from_slice(&session.output_tail);
+    combined.extend_from_slice(bytes);
+
+    let enable_at = find_last(&combined, BRACKETED_PASTE_ENABLE);
+    let disable_at = find_last(&combined, BRACKETED_PASTE_DISABLE);
+    match (enable_at, disable_at) {
+        (Some(enable), Some(disable)) => session.bracketed_paste_enabled = enable > disable,
+        (Some(_), None) => session.bracketed_paste_enabled = true,
+        (None, Some(_)) => session.bracketed_paste_enabled = false,
+        (None, None) => {}
+    }
+
+    let tail_start = combined.len().saturating_sub(OUTPUT_TAIL_LIMIT);
+    session.output_tail = combined[tail_start..].to_vec();
+}
+
+fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
 }
 
 impl Drop for SessionRegistry {

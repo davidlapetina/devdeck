@@ -34,4 +34,6 @@ pub struct TerminalSession {
     pub pid: Option<u32>,
     pub last_activity: Option<Instant>,
     pub reader_thread: Option<JoinHandle<()>>,
+    pub bracketed_paste_enabled: bool,
+    pub output_tail: Vec<u8>,
 }

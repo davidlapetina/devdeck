@@ -10,7 +10,10 @@ use std::{
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
-    event::{self as crossterm_event, Event as CrosstermEvent},
+    event::{
+        self as crossterm_event, DisableBracketedPaste, EnableBracketedPaste,
+        Event as CrosstermEvent,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -85,9 +88,10 @@ fn run_loop(
                 CrosstermEvent::Mouse(mouse) => {
                     handle_app_event(terminal, app, &event_tx, AppEvent::Mouse(mouse))?
                 }
-                CrosstermEvent::FocusGained
-                | CrosstermEvent::FocusLost
-                | CrosstermEvent::Paste(_) => {}
+                CrosstermEvent::Paste(text) => {
+                    handle_app_event(terminal, app, &event_tx, AppEvent::Paste(text))?
+                }
+                CrosstermEvent::FocusGained | CrosstermEvent::FocusLost => {}
             }
         } else {
             handle_app_event(terminal, app, &event_tx, AppEvent::Tick)?;
@@ -113,6 +117,7 @@ fn handle_app_event(
                 handle_external_open(terminal, app, open)?;
             }
         }
+        AppEvent::Paste(text) => app.handle_paste(text),
         AppEvent::Resize { width, height } => {
             let area = Rect::new(0, 0, width, height);
             let dimensions = ui::layout::terminal_dimensions(ui::layout::areas(area).content);
@@ -149,7 +154,7 @@ fn current_terminal_dimensions(terminal: &AppTerminal) -> Result<devdeck::app::T
 fn setup_terminal() -> Result<AppTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
@@ -158,14 +163,22 @@ fn setup_terminal() -> Result<AppTerminal> {
 
 fn restore_terminal(terminal: &mut AppTerminal) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
 
 fn resume_terminal(terminal: &mut AppTerminal) -> Result<()> {
     enable_raw_mode()?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableBracketedPaste
+    )?;
     terminal.hide_cursor()?;
     terminal.clear()?;
     Ok(())

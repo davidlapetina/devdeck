@@ -43,6 +43,7 @@ Claude Code, Codex, shells, Git tools, and editors are all just configured comma
 - Added filename, relative path, and absolute path copy actions.
 - Added command launch with the selected path appended as the final argument.
 - Added Codex/Claude agent launch from configured profiles with a prompt scoped to the selected path.
+- Fixed multiline paste in terminal tabs by forwarding supported pastes as bracketed paste blocks.
 
 ## Install From Source
 

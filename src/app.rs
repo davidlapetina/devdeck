@@ -15,7 +15,7 @@ use crate::{
     filesystem::tree::{FileTree, VisibleEntry},
     input::keymap::{map_key, KeyAction},
     preview::{self, PreviewContent, PreviewState},
-    pty::input::key_event_to_bytes,
+    pty::input::{key_event_to_bytes, normalize_paste_newlines, paste_text_to_bytes},
     search::SearchState,
     session::{
         launcher::{command_spec_from_profile, parent_shell_profile},
@@ -337,6 +337,45 @@ impl App {
                 None
             }
             None => None,
+        }
+    }
+
+    pub fn handle_paste(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+
+        if self.search.active && self.input_mode == InputMode::Repository {
+            let entries = self.tree.all_entries();
+            self.search.push_str(&paste_single_line(&text), &entries);
+            return;
+        }
+
+        match self.input_mode {
+            InputMode::Terminal => self.paste_into_active_terminal(&text),
+            InputMode::TabLauncher => {
+                if let Some(field) = launcher_field_mut(&mut self.launcher) {
+                    field.push_str(&paste_single_line(&text));
+                }
+            }
+            InputMode::RenameTab | InputMode::RenamePath => {
+                self.rename.value.push_str(&paste_single_line(&text));
+            }
+            InputMode::PromptOverlay => {
+                self.prompt.text.push_str(&normalize_paste_newlines(&text));
+            }
+            InputMode::AgentPrompt => {
+                self.agent_prompt
+                    .text
+                    .push_str(&normalize_paste_newlines(&text));
+            }
+            InputMode::Repository
+            | InputMode::CommandPrefix
+            | InputMode::FileActions
+            | InputMode::ConfirmStop
+            | InputMode::ConfirmRestart
+            | InputMode::ConfirmQuit
+            | InputMode::Help => {}
         }
     }
 
@@ -662,6 +701,20 @@ impl App {
                 }
             }
             TerminalTabState::Starting => {}
+        }
+    }
+
+    fn paste_into_active_terminal(&mut self, text: &str) {
+        let Some(session_id) = self.active_terminal_session_id() else {
+            return;
+        };
+        let bracketed = self
+            .sessions
+            .session(session_id)
+            .is_some_and(|session| session.bracketed_paste_enabled);
+        let bytes = paste_text_to_bytes(text, bracketed);
+        if let Err(error) = self.sessions.write(session_id, &bytes) {
+            self.set_status(format!("Unable to paste into terminal: {error}"));
         }
     }
 
@@ -2524,6 +2577,13 @@ fn selected_action_name(path: &Path, prefix: &str) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("root");
     format!("{prefix} {name}")
+}
+
+fn paste_single_line(text: &str) -> String {
+    normalize_paste_newlines(text)
+        .split('\n')
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn split_link_fragment(target: &str) -> (&str, Option<&str>) {

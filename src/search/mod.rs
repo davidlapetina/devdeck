@@ -40,6 +40,11 @@ impl SearchState {
         self.update(entries);
     }
 
+    pub fn push_str(&mut self, text: &str, entries: &[FlatEntry]) {
+        self.query.push_str(text);
+        self.update(entries);
+    }
+
     pub fn backspace(&mut self, entries: &[FlatEntry]) {
         self.query.pop();
         self.update(entries);
