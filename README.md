@@ -20,8 +20,7 @@ Interactive Git tab running `lazygit` inside DevDeck:
 - Plain text, source-code, binary metadata, and rendered Markdown previews with link navigation
 - Independent preview scrolling and automatic refresh on filesystem changes
 - Filename search
-- Relative and absolute path copying
-- File and folder actions for renaming, filename/path copying, command launch, and agent launch
+- File and folder actions for rename, filename copy, relative/absolute path copy, command launch, and agent launch
 - External file opening
 - Temporary in-DevDeck editor tabs
 - Configurable terminal tabs for arbitrary commands
@@ -34,6 +33,16 @@ Interactive Git tab running `lazygit` inside DevDeck:
 - Help, rename, confirmation, and prompt overlays
 
 Claude Code, Codex, shells, Git tools, and editors are all just configured commands. DevDeck does not hardcode special behavior for any of them.
+
+## Release Notes
+
+### 0.2.0
+
+- Added a file actions overlay on `a` for selected files and folders.
+- Added file/folder rename from the Files tab.
+- Added filename, relative path, and absolute path copy actions.
+- Added command launch with the selected path appended as the final argument.
+- Added Codex/Claude agent launch from configured profiles with a prompt scoped to the selected path.
 
 ## Install From Source
 
