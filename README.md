@@ -36,6 +36,10 @@ Claude Code, Codex, shells, Git tools, and editors are all just configured comma
 
 ## Release Notes
 
+### 0.20.1
+
+- Fixed `Shift+Tab` in running terminal tabs by forwarding the reverse-tab escape sequence to the child process.
+
 ### 0.2.0
 
 - Added a file actions overlay on `a` for selected files and folders.

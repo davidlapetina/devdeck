@@ -22,6 +22,7 @@ pub fn key_event_to_bytes(event: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Enter => Some(vec![b'\r']),
         KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
         KeyCode::Esc => Some(vec![0x1b]),
         KeyCode::Up => Some(b"\x1b[A".to_vec()),
         KeyCode::Down => Some(b"\x1b[B".to_vec()),
@@ -145,6 +146,10 @@ mod tests {
         assert_eq!(
             key_event_to_bytes(key(KeyCode::PageDown, KeyModifiers::NONE)),
             Some(b"\x1b[6~".to_vec())
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            Some(b"\x1b[Z".to_vec())
         );
     }
 
