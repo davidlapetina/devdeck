@@ -7,16 +7,22 @@ use std::{
 
 use anyhow::{Context, Result};
 
-const IGNORED_DIRECTORIES: &[&str] = &[
+pub const DEFAULT_IGNORED_DIRECTORIES: &[&str] = &[
     ".git",
     "target",
     "node_modules",
     ".dart_tool",
-    "build",
     "dist",
     "coverage",
     ".idea",
 ];
+
+pub fn default_ignored_directories() -> Vec<String> {
+    DEFAULT_IGNORED_DIRECTORIES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 pub struct TreeNode {
@@ -53,7 +59,11 @@ pub struct FileTree {
 }
 
 impl FileTree {
-    pub fn scan(root: impl AsRef<Path>, show_hidden: bool) -> Result<Self> {
+    pub fn scan(
+        root: impl AsRef<Path>,
+        show_hidden: bool,
+        ignored_directories: &[String],
+    ) -> Result<Self> {
         let root = root
             .as_ref()
             .canonicalize()
@@ -63,7 +73,7 @@ impl FileTree {
             anyhow::bail!("Path is not a directory: {}", root.display());
         }
 
-        let root_node = scan_node(&root, &root, show_hidden)?;
+        let root_node = scan_node(&root, &root, show_hidden, ignored_directories)?;
         Ok(Self { root, root_node })
     }
 
@@ -100,8 +110,8 @@ impl FileTree {
     }
 }
 
-pub fn is_ignored_directory(name: &str) -> bool {
-    IGNORED_DIRECTORIES
+pub fn is_ignored_directory(name: &str, ignored_directories: &[String]) -> bool {
+    ignored_directories
         .iter()
         .any(|ignored| ignored.eq_ignore_ascii_case(name))
 }
@@ -110,7 +120,12 @@ pub fn is_hidden_name(name: &str) -> bool {
     name.starts_with('.') && name != "." && name != ".."
 }
 
-fn scan_node(path: &Path, root: &Path, show_hidden: bool) -> Result<TreeNode> {
+fn scan_node(
+    path: &Path,
+    root: &Path,
+    show_hidden: bool,
+    ignored_directories: &[String],
+) -> Result<TreeNode> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("Unable to read metadata: {}", path.display()))?;
     let is_dir = metadata.is_dir();
@@ -142,7 +157,7 @@ fn scan_node(path: &Path, root: &Path, show_hidden: bool) -> Result<TreeNode> {
             if !show_hidden && is_hidden_name(&child_name) {
                 continue;
             }
-            if child_is_dir && is_ignored_directory(&child_name) {
+            if child_is_dir && is_ignored_directory(&child_name, ignored_directories) {
                 continue;
             }
 
@@ -162,7 +177,7 @@ fn scan_node(path: &Path, root: &Path, show_hidden: bool) -> Result<TreeNode> {
         });
 
         for (child_path, _, _) in entries {
-            if let Ok(child) = scan_node(&child_path, root, show_hidden) {
+            if let Ok(child) = scan_node(&child_path, root, show_hidden, ignored_directories) {
                 children.push(child);
             }
         }
@@ -245,6 +260,10 @@ mod tests {
         fs::write(path, "").unwrap();
     }
 
+    fn scan_default(root: &Path, show_hidden: bool) -> FileTree {
+        FileTree::scan(root, show_hidden, &default_ignored_directories()).unwrap()
+    }
+
     #[test]
     fn sorts_directories_before_files_alphabetically() {
         let temp = TempDir::new().unwrap();
@@ -253,7 +272,7 @@ mod tests {
         touch(&temp.path().join("beta.txt"));
         touch(&temp.path().join("aardvark.txt"));
 
-        let tree = FileTree::scan(temp.path(), false).unwrap();
+        let tree = scan_default(temp.path(), false);
         let names: Vec<_> = tree
             .root_node
             .children
@@ -270,7 +289,7 @@ mod tests {
         touch(&temp.path().join(".hidden"));
         touch(&temp.path().join("visible"));
 
-        let tree = FileTree::scan(temp.path(), false).unwrap();
+        let tree = scan_default(temp.path(), false);
         let names: Vec<_> = tree
             .root_node
             .children
@@ -287,7 +306,7 @@ mod tests {
         touch(&temp.path().join(".hidden"));
         touch(&temp.path().join("visible"));
 
-        let tree = FileTree::scan(temp.path(), true).unwrap();
+        let tree = scan_default(temp.path(), true);
         let names: Vec<_> = tree
             .root_node
             .children
@@ -303,9 +322,27 @@ mod tests {
         let temp = TempDir::new().unwrap();
         fs::create_dir(temp.path().join(".git")).unwrap();
         fs::create_dir(temp.path().join("node_modules")).unwrap();
+        fs::create_dir(temp.path().join("build")).unwrap();
         fs::create_dir(temp.path().join("src")).unwrap();
 
-        let tree = FileTree::scan(temp.path(), true).unwrap();
+        let tree = scan_default(temp.path(), true);
+        let names: Vec<_> = tree
+            .root_node
+            .children
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect();
+
+        assert_eq!(names, ["build", "src"]);
+    }
+
+    #[test]
+    fn uses_configured_ignored_directories() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("cache")).unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+
+        let tree = FileTree::scan(temp.path(), true, &["cache".to_string()]).unwrap();
         let names: Vec<_> = tree
             .root_node
             .children
@@ -322,7 +359,7 @@ mod tests {
         fs::create_dir(temp.path().join("docs")).unwrap();
         touch(&temp.path().join("docs/readme.md"));
 
-        let tree = FileTree::scan(temp.path(), false).unwrap();
+        let tree = scan_default(temp.path(), false);
         let root = temp.path().canonicalize().unwrap();
         let ancestor = tree.nearest_existing_ancestor(&root.join("docs/missing.md"));
 

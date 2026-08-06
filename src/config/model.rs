@@ -14,6 +14,7 @@ pub struct ConfigFile {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceConfig {
     pub default_tab: Option<String>,
+    pub ignored_directories: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

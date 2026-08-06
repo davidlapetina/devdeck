@@ -21,6 +21,8 @@ version = 1
 
 [workspace]
 default_tab = "Files"
+# Directory names omitted from the file tree. Set to [] to disable this filter.
+ignored_directories = [".git", "target", "node_modules", ".dart_tool", "dist", "coverage", ".idea"]
 
 [[tabs]]
 name = "Claude"

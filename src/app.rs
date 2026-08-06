@@ -12,7 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::{
     config::{self, ResolvedConfig, TerminalProfile},
     event::{EventSender, FsEventBatch},
-    filesystem::tree::{FileTree, VisibleEntry},
+    filesystem::tree::{default_ignored_directories, FileTree, VisibleEntry},
     input::keymap::{map_key, KeyAction},
     preview::{self, PreviewContent, PreviewState},
     pty::input::{key_event_to_bytes, normalize_paste_newlines, paste_text_to_bytes},
@@ -155,6 +155,7 @@ pub struct App {
     pub preview_link_index: Option<usize>,
     pub search: SearchState,
     pub show_hidden: bool,
+    pub ignored_directories: Vec<String>,
     pub watch_enabled: bool,
     pub markdown_rendered: bool,
     pub tabs: Vec<Tab>,
@@ -180,7 +181,12 @@ impl App {
         watch_enabled: bool,
         config: ResolvedConfig,
     ) -> Result<Self> {
-        let tree = FileTree::scan(&root_path, show_hidden)?;
+        let ignored_directories = config
+            .workspace
+            .ignored_directories
+            .clone()
+            .unwrap_or_else(default_ignored_directories);
+        let tree = FileTree::scan(&root_path, show_hidden, &ignored_directories)?;
         let root_path = tree.root.clone();
         let mut expanded_directories = HashSet::new();
         expanded_directories.insert(root_path.clone());
@@ -218,6 +224,7 @@ impl App {
             preview_link_index: None,
             search: SearchState::default(),
             show_hidden,
+            ignored_directories,
             watch_enabled,
             markdown_rendered: true,
             tabs,
@@ -1752,7 +1759,17 @@ impl App {
         let active_title = self.tabs.get(self.active_tab).map(|tab| tab.title.clone());
         match config::load_config(&self.root_path) {
             Ok(config) => {
+                let ignored_directories = config
+                    .workspace
+                    .ignored_directories
+                    .clone()
+                    .unwrap_or_else(default_ignored_directories);
+                let ignored_directories_changed = self.ignored_directories != ignored_directories;
                 let (added, changed, removed) = self.reconcile_config(config);
+                if ignored_directories_changed {
+                    self.ignored_directories = ignored_directories;
+                    self.reload_tree_preserving_selection();
+                }
                 if let Some(title) = active_title {
                     if let Some(index) = self.tabs.iter().position(|tab| tab.title == title) {
                         self.active_tab = index;
@@ -1761,8 +1778,13 @@ impl App {
                     }
                     self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
                 }
+                let tree_detail = if ignored_directories_changed {
+                    ", tree refreshed"
+                } else {
+                    ""
+                };
                 self.set_status(format!(
-                    "Configuration reloaded: {added} added, {changed} changed, {removed} removed"
+                    "Configuration reloaded: {added} added, {changed} changed, {removed} removed{tree_detail}"
                 ));
             }
             Err(error) => self.set_status(format!("Configuration reload failed: {error:#}")),
@@ -2413,7 +2435,7 @@ impl App {
             .selected_path
             .clone()
             .unwrap_or_else(|| self.root_path.clone());
-        match FileTree::scan(&self.root_path, self.show_hidden) {
+        match FileTree::scan(&self.root_path, self.show_hidden, &self.ignored_directories) {
             Ok(tree) => {
                 self.tree = tree;
                 self.expanded_directories.insert(self.root_path.clone());
@@ -2718,6 +2740,68 @@ mod tests {
         let notes = temp.path().canonicalize().unwrap().join("notes.md");
         app.select_path(&notes, true);
         assert!(!app.markdown_rendered);
+    }
+
+    #[test]
+    fn configured_ignored_directories_override_tree_defaults() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("cache")).unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::create_dir(temp.path().join("target")).unwrap();
+        let config = ResolvedConfig {
+            workspace: WorkspaceConfig {
+                ignored_directories: Some(vec!["cache".to_string()]),
+                ..WorkspaceConfig::default()
+            },
+            tabs: Vec::new(),
+        };
+
+        let app = App::new(temp.path().to_path_buf(), false, false, config).unwrap();
+        let names: Vec<_> = app
+            .tree
+            .root_node
+            .children
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect();
+
+        assert_eq!(names, ["src", "target"]);
+    }
+
+    #[test]
+    fn configuration_reload_refreshes_changed_tree_filters() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("cache")).unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        let mut app = app(&temp);
+        assert!(app
+            .tree
+            .root_node
+            .children
+            .iter()
+            .any(|node| node.name == "cache"));
+
+        fs::write(
+            temp.path().join(".devdeck.toml"),
+            r#"
+version = 1
+[workspace]
+ignored_directories = ["cache"]
+"#,
+        )
+        .unwrap();
+
+        app.reload_configuration();
+
+        let names: Vec<_> = app
+            .tree
+            .root_node
+            .children
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect();
+        assert_eq!(names, ["src"]);
+        assert_eq!(app.ignored_directories, ["cache"]);
     }
 
     #[test]

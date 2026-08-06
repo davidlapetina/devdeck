@@ -27,6 +27,9 @@ pub fn merge_configs(
         if project.workspace.default_tab.is_some() {
             workspace.default_tab = project.workspace.default_tab;
         }
+        if project.workspace.ignored_directories.is_some() {
+            workspace.ignored_directories = project.workspace.ignored_directories;
+        }
 
         for raw_profile in project.tabs {
             let profile = expand_profile(raw_profile, repo_root)?;
@@ -129,5 +132,62 @@ args = ["$DEVDECK_TEST_ARG"]
 
         assert_eq!(resolved.tabs[0].command, "sh");
         assert_eq!(resolved.tabs[0].args, ["-l"]);
+    }
+
+    #[test]
+    fn project_ignored_directories_replace_global_value() {
+        let temp = TempDir::new().unwrap();
+        let global = parse_config_toml(
+            r#"
+version = 1
+[workspace]
+ignored_directories = ["target", "node_modules"]
+"#,
+            "global config",
+        )
+        .unwrap();
+        let project = parse_config_toml(
+            r#"
+version = 1
+[workspace]
+ignored_directories = ["cache"]
+"#,
+            ".devdeck.toml",
+        )
+        .unwrap();
+
+        let resolved = merge_configs(Some(global), Some(project), temp.path()).unwrap();
+
+        assert_eq!(
+            resolved.workspace.ignored_directories,
+            Some(vec!["cache".to_string()])
+        );
+    }
+
+    #[test]
+    fn project_can_disable_ignored_directories() {
+        let temp = TempDir::new().unwrap();
+        let global = parse_config_toml(
+            r#"
+version = 1
+[workspace]
+ignored_directories = ["target"]
+"#,
+            "global config",
+        )
+        .unwrap();
+        let project = parse_config_toml(
+            r#"
+version = 1
+[workspace]
+ignored_directories = []
+"#,
+            ".devdeck.toml",
+        )
+        .unwrap();
+
+        let resolved = merge_configs(Some(global), Some(project), temp.path()).unwrap();
+
+        assert_eq!(resolved.workspace.ignored_directories, Some(Vec::new()));
     }
 }

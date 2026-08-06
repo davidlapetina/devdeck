@@ -16,6 +16,20 @@ pub fn validate_raw_config(config: &ConfigFile, source_name: &str) -> Result<()>
         );
     }
 
+    if let Some(ignored_directories) = &config.workspace.ignored_directories {
+        for directory in ignored_directories {
+            if directory.trim().is_empty() {
+                anyhow::bail!("Invalid {source_name}: ignored_directories entries cannot be empty");
+            }
+            if directory.contains('/') || directory.contains('\\') {
+                anyhow::bail!(
+                    "Invalid {source_name}: ignored_directories entries must be directory names, not paths: {:?}",
+                    directory
+                );
+            }
+        }
+    }
+
     let mut names = HashSet::new();
     for profile in &config.tabs {
         let name = profile.name.trim();

@@ -16,7 +16,7 @@ Interactive Git tab running `lazygit` inside DevDeck:
 
 ## Features
 
-- Repository tree navigation with hidden-file toggle and generated-directory filtering
+- Repository tree navigation with hidden-file toggle and configurable generated-directory filtering
 - Plain text, source-code, binary metadata, and rendered Markdown previews with link navigation
 - Independent preview scrolling and automatic refresh on filesystem changes
 - Filename search
@@ -106,6 +106,8 @@ version = 1
 
 [workspace]
 default_tab = "Files"
+# Directory names omitted from the file tree. Set to [] to disable this filter.
+ignored_directories = [".git", "target", "node_modules", ".dart_tool", "dist", "coverage", ".idea"]
 
 [[tabs]]
 name = "Claude"
@@ -152,6 +154,7 @@ Expansion rules:
 
 - `~` and environment variables are expanded in `command`, `args`, `cwd`, and environment values.
 - Relative `cwd` values resolve against the repository root.
+- `workspace.ignored_directories` matches directory names case-insensitively. Project config replaces the global list when set.
 - Claude and Codex profiles without an explicit `cwd` start in the current file-browser folder. If a file is selected, they start in that file's parent directory. Set `cwd` to pin them to a fixed directory.
 - Commands launch as executable plus argument vector, not through an implicit shell.
 - If a configured command is missing, its tab shows `Executable not found: <command>` and DevDeck keeps running.
