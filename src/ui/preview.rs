@@ -16,6 +16,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         &app.preview,
         app.markdown_rendered,
         inner.width,
+        inner.height,
         focused_link,
     );
     app.preview

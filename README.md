@@ -17,7 +17,7 @@ Interactive Git tab running `lazygit` inside DevDeck:
 ## Features
 
 - Repository tree navigation with hidden-file toggle and configurable generated-directory filtering
-- Plain text, source-code, binary metadata, and rendered Markdown previews with link navigation
+- Plain text, source-code, image, binary metadata, and rendered Markdown previews with link navigation
 - Independent preview scrolling and automatic refresh on filesystem changes
 - Filename search
 - File and folder actions for rename, filename copy, relative/absolute path copy, command launch, and agent launch
@@ -36,8 +36,14 @@ Claude Code, Codex, shells, Git tools, and editors are all just configured comma
 
 ## Release Notes
 
+### 0.20.2
+
+- Added portable image previews for common image formats using terminal truecolor block rendering.
+- Added a larger bounded preview size limit for image files.
+
 ### 0.20.1
 
+- Added mouse-wheel scrolling for file previews and terminal tabs.
 - Fixed `Shift+Tab` in running terminal tabs by forwarding the reverse-tab escape sequence to the child process.
 
 ### 0.2.0

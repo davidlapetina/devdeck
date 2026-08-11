@@ -1,6 +1,6 @@
 [package]
 name = "devdeck"
-version = "0.20.1"
+version = "0.20.2"
 edition = "2021"
 description = "A fast terminal repository explorer with live previews."
 license = "MIT"
@@ -12,6 +12,14 @@ chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 fuzzy-matcher = "0.3"
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "jpeg",
+    "png",
+    "tiff",
+    "webp",
+] }
 notify = "6"
 portable-pty = "0.8"
 pulldown-cmark = "0.9"

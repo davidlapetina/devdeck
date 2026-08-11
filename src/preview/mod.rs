@@ -16,11 +16,21 @@ pub mod syntax;
 pub mod text;
 
 pub const MAX_PREVIEW_SIZE: u64 = 2 * 1024 * 1024;
+pub const MAX_IMAGE_PREVIEW_SIZE: u64 = 20 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct ImagePreview {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
 
 #[derive(Debug, Clone)]
 pub enum PreviewContent {
     Empty,
     Directory { entries: Vec<String> },
+    Image(ImagePreview),
     Text { content: String, language: Language },
     Markdown { content: String },
     Binary { name: String },
@@ -130,11 +140,13 @@ pub fn render_lines(
     preview: &PreviewState,
     render_markdown: bool,
     width: u16,
+    height: u16,
     focused_link: Option<usize>,
 ) -> Vec<Line<'static>> {
     match &preview.content {
         PreviewContent::Empty => vec![Line::from("")],
         PreviewContent::Directory { entries } => render_directory(preview, entries),
+        PreviewContent::Image(image) => render_image(preview, image, width, height),
         PreviewContent::Text { content, language } => syntax::highlight(content, Some(*language)),
         PreviewContent::Markdown { content } if render_markdown => {
             markdown::render_markdown_with_focus(
@@ -203,7 +215,14 @@ fn load_preview(path: &Path) -> PreviewState {
         };
     }
 
-    if metadata.len() > MAX_PREVIEW_SIZE {
+    let detected = detect_path(path, false);
+    let max_preview_size = if detected == DetectedFileType::Image {
+        MAX_IMAGE_PREVIEW_SIZE
+    } else {
+        MAX_PREVIEW_SIZE
+    };
+
+    if metadata.len() > max_preview_size {
         return PreviewState {
             path: Some(path.to_path_buf()),
             file_type: DetectedFileType::TooLarge,
@@ -229,6 +248,37 @@ fn load_preview(path: &Path) -> PreviewState {
             }
         }
     };
+
+    if detected == DetectedFileType::Image {
+        return match image::load_from_memory(&bytes) {
+            Ok(image) => {
+                let rgba = image.to_rgba8();
+                PreviewState {
+                    path: Some(path.to_path_buf()),
+                    file_type: DetectedFileType::Image,
+                    size,
+                    modified,
+                    content: PreviewContent::Image(ImagePreview {
+                        name: file_name(path),
+                        width: rgba.width(),
+                        height: rgba.height(),
+                        rgba: rgba.into_raw(),
+                    }),
+                    ..PreviewState::default()
+                }
+            }
+            Err(error) => PreviewState {
+                path: Some(path.to_path_buf()),
+                file_type: DetectedFileType::Image,
+                size,
+                modified,
+                content: PreviewContent::Error {
+                    message: format!("Unable to decode image: {error}"),
+                },
+                ..PreviewState::default()
+            },
+        };
+    }
 
     if bytes.contains(&0) {
         return PreviewState {
@@ -259,7 +309,7 @@ fn load_preview(path: &Path) -> PreviewState {
         }
     };
 
-    match detect_path(path, false) {
+    match detected {
         DetectedFileType::Markdown => PreviewState {
             path: Some(path.to_path_buf()),
             file_type: DetectedFileType::Markdown,
@@ -270,7 +320,7 @@ fn load_preview(path: &Path) -> PreviewState {
         },
         DetectedFileType::Source(language) | DetectedFileType::Text(language) => PreviewState {
             path: Some(path.to_path_buf()),
-            file_type: detect_path(path, false),
+            file_type: detected,
             size,
             modified,
             content: PreviewContent::Text { content, language },
@@ -287,6 +337,111 @@ fn load_preview(path: &Path) -> PreviewState {
             },
             ..PreviewState::default()
         },
+    }
+}
+
+fn render_image(
+    preview: &PreviewState,
+    image: &ImagePreview,
+    width: u16,
+    height: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled("Image", Style::default().fg(Color::Cyan))),
+        Line::from(""),
+        Line::from(format!("Name: {}", image.name)),
+        Line::from(format!("Dimensions: {} x {}", image.width, image.height)),
+        Line::from(format!(
+            "Size: {}",
+            preview
+                .size
+                .map(format_size)
+                .unwrap_or_else(|| "unknown".to_string())
+        )),
+        Line::from(format!("Modified: {}", format_modified(preview.modified))),
+        Line::from(""),
+    ];
+
+    if image.width == 0 || image.height == 0 || image.rgba.is_empty() {
+        lines.push(Line::from("Image has no pixels"));
+        return lines;
+    }
+
+    let available_width = u32::from(width).max(1);
+    let available_rows = u32::from(height).saturating_sub(lines.len() as u32).max(1);
+    let available_pixel_height = available_rows.saturating_mul(2);
+    let scale = (available_width as f64 / image.width as f64)
+        .min(available_pixel_height as f64 / image.height as f64)
+        .min(1.0);
+    let output_width = ((image.width as f64 * scale).floor() as u32).max(1);
+    let output_height = ((image.height as f64 * scale).floor() as u32).max(1);
+    let output_rows = output_height.div_ceil(2);
+
+    for row in 0..output_rows {
+        let mut spans = Vec::with_capacity(output_width as usize);
+        for col in 0..output_width {
+            let top = sample_scaled_pixel(image, col, row * 2, output_width, output_height);
+            let bottom = if row * 2 + 1 < output_height {
+                sample_scaled_pixel(image, col, row * 2 + 1, output_width, output_height)
+            } else {
+                Rgb::BLACK
+            };
+            spans.push(Span::styled(
+                "▀",
+                Style::default()
+                    .fg(Color::Rgb(top.red, top.green, top.blue))
+                    .bg(Color::Rgb(bottom.red, bottom.green, bottom.blue)),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Rgb {
+    red: u8,
+    green: u8,
+    blue: u8,
+}
+
+impl Rgb {
+    const BLACK: Self = Self {
+        red: 0,
+        green: 0,
+        blue: 0,
+    };
+}
+
+fn sample_scaled_pixel(
+    image: &ImagePreview,
+    output_x: u32,
+    output_y: u32,
+    output_width: u32,
+    output_height: u32,
+) -> Rgb {
+    let source_x = scale_coordinate(output_x, output_width, image.width);
+    let source_y = scale_coordinate(output_y, output_height, image.height);
+    let index = ((source_y * image.width + source_x) * 4) as usize;
+    let red = image.rgba.get(index).copied().unwrap_or_default();
+    let green = image.rgba.get(index + 1).copied().unwrap_or_default();
+    let blue = image.rgba.get(index + 2).copied().unwrap_or_default();
+    let alpha = image.rgba.get(index + 3).copied().unwrap_or(255);
+    blend_with_black(red, green, blue, alpha)
+}
+
+fn scale_coordinate(output: u32, output_size: u32, source_size: u32) -> u32 {
+    let scaled = (u64::from(output) * u64::from(source_size)) / u64::from(output_size);
+    scaled.min(u64::from(source_size.saturating_sub(1))) as u32
+}
+
+fn blend_with_black(red: u8, green: u8, blue: u8, alpha: u8) -> Rgb {
+    let alpha = u16::from(alpha);
+    Rgb {
+        red: ((u16::from(red) * alpha) / 255) as u8,
+        green: ((u16::from(green) * alpha) / 255) as u8,
+        blue: ((u16::from(blue) * alpha) / 255) as u8,
     }
 }
 
@@ -413,5 +568,31 @@ mod tests {
 
         assert!(matches!(preview.content, PreviewContent::Binary { .. }));
         assert_eq!(preview.file_type, DetectedFileType::Binary);
+    }
+
+    #[test]
+    fn loads_png_images_for_preview() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("pixel.png");
+        fs::write(&path, tiny_png()).unwrap();
+
+        let preview = PreviewState::load(&path, false);
+
+        assert_eq!(preview.file_type, DetectedFileType::Image);
+        let PreviewContent::Image(image) = preview.content else {
+            panic!("expected image preview");
+        };
+        assert_eq!((image.width, image.height), (1, 1));
+        assert_eq!(image.rgba.len(), 4);
+    }
+
+    fn tiny_png() -> &'static [u8] {
+        &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99,
+            0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ]
     }
 }

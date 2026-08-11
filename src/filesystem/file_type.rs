@@ -57,6 +57,7 @@ impl Language {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetectedFileType {
     Directory,
+    Image,
     Markdown,
     Source(Language),
     Text(Language),
@@ -68,6 +69,7 @@ impl DetectedFileType {
     pub fn label(self) -> &'static str {
         match self {
             Self::Directory => "directory",
+            Self::Image => "image",
             Self::Markdown => "markdown",
             Self::Source(language) | Self::Text(language) => language.label(),
             Self::Binary => "binary",
@@ -93,6 +95,7 @@ pub fn detect_path(path: &Path, is_dir: bool) -> DetectedFileType {
         .to_ascii_lowercase();
 
     match extension.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" => DetectedFileType::Image,
         "md" | "markdown" | "mdown" => DetectedFileType::Markdown,
         "rs" => DetectedFileType::Source(Language::Rust),
         "json" => DetectedFileType::Source(Language::Json),
@@ -140,6 +143,10 @@ mod tests {
         assert_eq!(
             detect_path(Path::new("README.md"), false),
             DetectedFileType::Markdown
+        );
+        assert_eq!(
+            detect_path(Path::new("screenshot.png"), false),
+            DetectedFileType::Image
         );
     }
 
