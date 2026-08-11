@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use arboard::Clipboard;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::{
     config::{self, ResolvedConfig, TerminalProfile},
@@ -31,6 +31,7 @@ const RESTART_ON_EXIT_DELAY: Duration = Duration::from_secs(1);
 const FAST_RESTART_WINDOW: Duration = Duration::from_secs(5);
 const MAX_FAST_RESTARTS: u8 = 3;
 const BACKGROUND_OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
+const MOUSE_SCROLL_LINES: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalOpen {
@@ -386,6 +387,30 @@ impl App {
         }
     }
 
+    pub fn handle_mouse(&mut self, event: MouseEvent) {
+        let delta = match event.kind {
+            MouseEventKind::ScrollUp => -(MOUSE_SCROLL_LINES as isize),
+            MouseEventKind::ScrollDown => MOUSE_SCROLL_LINES as isize,
+            _ => return,
+        };
+
+        match self.input_mode {
+            InputMode::Repository => self.preview.scroll_lines(delta),
+            InputMode::Terminal => self.scroll_active_terminal(delta),
+            InputMode::CommandPrefix
+            | InputMode::TabLauncher
+            | InputMode::RenameTab
+            | InputMode::RenamePath
+            | InputMode::FileActions
+            | InputMode::ConfirmStop
+            | InputMode::ConfirmRestart
+            | InputMode::ConfirmQuit
+            | InputMode::Help
+            | InputMode::PromptOverlay
+            | InputMode::AgentPrompt => {}
+        }
+    }
+
     pub fn handle_filesystem_event(&mut self, batch: FsEventBatch) {
         let selected_before = self.selected_path.clone();
         if batch.tree_changed {
@@ -701,6 +726,7 @@ impl App {
             TerminalTabState::Running => {
                 if let Some(session_id) = session_id {
                     if let Some(bytes) = key_event_to_bytes(event) {
+                        self.scroll_terminal_to_bottom(session_id);
                         if let Err(error) = self.sessions.write(session_id, &bytes) {
                             self.set_status(format!("Unable to write to terminal: {error}"));
                         }
@@ -720,8 +746,48 @@ impl App {
             .session(session_id)
             .is_some_and(|session| session.bracketed_paste_enabled);
         let bytes = paste_text_to_bytes(text, bracketed);
+        self.scroll_terminal_to_bottom(session_id);
         if let Err(error) = self.sessions.write(session_id, &bytes) {
             self.set_status(format!("Unable to paste into terminal: {error}"));
+        }
+    }
+
+    fn scroll_active_terminal(&mut self, delta: isize) {
+        let Some(session_id) = self.active_terminal_session_id() else {
+            return;
+        };
+
+        let alternate_screen = self
+            .sessions
+            .session(session_id)
+            .is_some_and(|session| session.terminal.screen().alternate_screen());
+        if alternate_screen {
+            let bytes = if delta < 0 {
+                b"\x1b[5~".as_slice()
+            } else {
+                b"\x1b[6~".as_slice()
+            };
+            if let Err(error) = self.sessions.write(session_id, bytes) {
+                self.set_status(format!("Unable to write to terminal: {error}"));
+            }
+            return;
+        }
+
+        let Some(session) = self.sessions.session_mut(session_id) else {
+            return;
+        };
+        let current = session.terminal.screen().scrollback();
+        let next = if delta < 0 {
+            current.saturating_add(delta.unsigned_abs())
+        } else {
+            current.saturating_sub(delta as usize)
+        };
+        session.terminal.set_scrollback(next);
+    }
+
+    fn scroll_terminal_to_bottom(&mut self, session_id: SessionId) {
+        if let Some(session) = self.sessions.session_mut(session_id) {
+            session.terminal.set_scrollback(0);
         }
     }
 

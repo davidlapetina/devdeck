@@ -9,6 +9,8 @@ use crate::{
     session::{CommandSpec, ProcessStatus, SessionId, TerminalPromptState, TerminalSession},
 };
 
+const TERMINAL_SCROLLBACK_ROWS: usize = 10_000;
+
 pub fn spawn_session(
     id: SessionId,
     title: String,
@@ -47,7 +49,7 @@ pub fn spawn_session(
         pty_master: pair.master,
         pty_writer,
         child,
-        terminal: vt100::Parser::new(rows, cols, 0),
+        terminal: vt100::Parser::new(rows, cols, TERMINAL_SCROLLBACK_ROWS),
         rows,
         cols,
         process_status: ProcessStatus::Running,

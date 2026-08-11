@@ -180,6 +180,7 @@ m              Toggle rendered/raw Markdown
 Ctrl-d         Preview page down
 Ctrl-u         Preview page up
 J / K          Preview line down/up
+Mouse wheel    Preview line scroll
 0 / $          Preview top/bottom
 ] / [          Next/previous Markdown preview link
 y / Y          Copy relative/absolute path
@@ -195,6 +196,8 @@ q              Quit with confirmation
 ```
 
 When a terminal tab is running, normal keyboard input goes directly to the child process. Use the command prefix for DevDeck commands that would otherwise be typed into Claude, Codex, a shell, Vim, Less, or another terminal program.
+
+The mouse wheel scrolls terminal scrollback for normal shell output. In full-screen terminal apps that use the alternate screen, the wheel sends PageUp/PageDown to the child process.
 
 Command prefix:
 

@@ -11,8 +11,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
     event::{
-        self as crossterm_event, DisableBracketedPaste, EnableBracketedPaste,
-        Event as CrosstermEvent,
+        self as crossterm_event, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event as CrosstermEvent,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -123,7 +123,7 @@ fn handle_app_event(
             let dimensions = ui::layout::terminal_dimensions(ui::layout::areas(area).content);
             app.resize_active_terminal(dimensions);
         }
-        AppEvent::Mouse(_) => {}
+        AppEvent::Mouse(mouse) => app.handle_mouse(mouse),
         AppEvent::FileSystem(batch) => app.handle_filesystem_event(batch),
         AppEvent::PtyOutput { session_id, bytes } => app.handle_pty_output(session_id, &bytes),
         AppEvent::ProcessExited {
@@ -154,7 +154,12 @@ fn current_terminal_dimensions(terminal: &AppTerminal) -> Result<devdeck::app::T
 fn setup_terminal() -> Result<AppTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
@@ -166,6 +171,7 @@ fn restore_terminal(terminal: &mut AppTerminal) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
+        DisableMouseCapture,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
@@ -177,7 +183,8 @@ fn resume_terminal(terminal: &mut AppTerminal) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        EnableMouseCapture
     )?;
     terminal.hide_cursor()?;
     terminal.clear()?;
