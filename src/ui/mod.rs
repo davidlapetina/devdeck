@@ -2,7 +2,7 @@ use ratatui::{prelude::*, widgets::*};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, InputMode, LauncherField},
+    app::{App, InputMode, LauncherField, ReminderField},
     tabs::TabContent,
 };
 
@@ -52,6 +52,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         InputMode::Help => render_help(frame),
         InputMode::PromptOverlay => render_prompt(frame, app),
         InputMode::AgentPrompt => render_agent_prompt(frame, app),
+        InputMode::ReminderEditor => render_reminder_editor(frame, app),
+        InputMode::Reminders => render_reminders(frame, app),
         InputMode::Repository | InputMode::Terminal | InputMode::CommandPrefix => {}
     }
 }
@@ -228,7 +230,7 @@ fn render_launcher(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_file_actions(frame: &mut Frame<'_>, app: &App) {
-    let area = centered_rect(56, 32, frame.area());
+    let area = centered_rect(60, 44, frame.area());
     frame.render_widget(Clear, area);
     let title = app
         .selected_path()
@@ -248,6 +250,10 @@ fn render_file_actions(frame: &mut Frame<'_>, app: &App) {
         Line::from("!   Run command with selected path argument"),
         Line::from("g   Run configured agent with prompt"),
         Line::from("v   Open file in editor tab"),
+        Line::from("m   Mark/unmark for this session"),
+        Line::from("M   Show/hide marked-only list"),
+        Line::from("d   Add reminder with due date"),
+        Line::from("l   List reminders"),
         Line::from(""),
         Line::from("Esc cancel"),
     ];
@@ -277,6 +283,129 @@ fn render_rename(frame: &mut Frame<'_>, app: &App) {
         inner,
     );
     set_input_cursor(frame, inner, 0, "Name: ", &app.rename.value);
+}
+
+fn render_reminder_editor(frame: &mut Frame<'_>, app: &App) {
+    let area = centered_rect(68, 34, frame.area());
+    frame.render_widget(Clear, area);
+    let title = format!(
+        " Reminder For {} ",
+        app.relative_display(&app.reminder_editor.path)
+    );
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let field_style = |field| {
+        if app.reminder_editor.field == field {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default()
+        }
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::raw("Title: "),
+            Span::styled(
+                app.reminder_editor.title.clone(),
+                field_style(ReminderField::Title),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("Due:   "),
+            Span::styled(
+                app.reminder_editor.due.clone(),
+                field_style(ReminderField::Due),
+            ),
+        ]),
+        Line::from(""),
+        Line::from("Due format: YYYY-MM-DD"),
+        Line::from("Tab field | Enter save | Esc cancel"),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    match app.reminder_editor.field {
+        ReminderField::Title => {
+            set_input_cursor(frame, inner, 0, "Title: ", &app.reminder_editor.title)
+        }
+        ReminderField::Due => {
+            set_input_cursor(frame, inner, 1, "Due:   ", &app.reminder_editor.due)
+        }
+    }
+}
+
+fn render_reminders(frame: &mut Frame<'_>, app: &App) {
+    let area = centered_rect(82, 70, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Reminders ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let help_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(2),
+        inner.width,
+        2,
+    );
+    let list_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    let height = list_area.height as usize;
+    let selected = app.reminder_list_selected;
+    let offset = selected.saturating_sub(height.saturating_sub(1));
+    let today = chrono::Local::now().date_naive();
+
+    let items = app
+        .reminders
+        .reminders
+        .iter()
+        .skip(offset)
+        .take(height)
+        .enumerate()
+        .map(|(visible_index, reminder)| {
+            let index = offset + visible_index;
+            let status = App::reminder_status_label(reminder);
+            let done = if reminder.done { "x" } else { " " };
+            let path = reminder.path.to_string_lossy();
+            let style = if index == selected {
+                Style::default().fg(Color::Black).bg(Color::Yellow)
+            } else if reminder.done {
+                Style::default().fg(Color::DarkGray)
+            } else if reminder.due_date().is_some_and(|due| due < today) {
+                Style::default().fg(Color::Red)
+            } else if reminder.due_date().is_some_and(|due| due == today) {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(
+                format!(
+                    "[{done}] {} {status:>7}  {}  {}",
+                    reminder.due, path, reminder.title
+                ),
+                style,
+            )))
+        })
+        .collect::<Vec<_>>();
+
+    if items.is_empty() {
+        frame.render_widget(Paragraph::new("No reminders"), list_area);
+    } else {
+        frame.render_widget(List::new(items), list_area);
+    }
+    frame.render_widget(
+        Paragraph::new("Up/Down move | Enter select path | Space done | x delete | q/Esc close"),
+        help_area,
+    );
 }
 
 fn render_confirm(frame: &mut Frame<'_>, title: &str, help: &str) {
@@ -331,6 +460,7 @@ fn render_help(frame: &mut Frame<'_>) {
         Line::from(""),
         Line::from("Files: v opens selected file in an editor tab, e opens externally."),
         Line::from("Files: a opens file actions for rename, path copy, command, and agent launch."),
+        Line::from("Files: Space marks files, M filters to marked files, T lists reminders."),
         Line::from("Files: ]/[ selects Markdown preview links, Enter opens the selected link."),
         Line::from("Esc, Enter, or q closes this help."),
     ];

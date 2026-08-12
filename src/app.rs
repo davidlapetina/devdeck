@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use arboard::Clipboard;
+use chrono::Local;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::{
@@ -16,6 +17,7 @@ use crate::{
     input::keymap::{map_key, KeyAction},
     preview::{self, PreviewContent, PreviewState},
     pty::input::{key_event_to_bytes, normalize_paste_newlines, paste_text_to_bytes},
+    reminders::{parse_due_date, Reminder, ReminderStore},
     search::SearchState,
     session::{
         launcher::{command_spec_from_profile, parent_shell_profile},
@@ -55,6 +57,8 @@ pub enum InputMode {
     Help,
     PromptOverlay,
     AgentPrompt,
+    ReminderEditor,
+    Reminders,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +73,37 @@ pub enum LauncherField {
     Name,
     Command,
     Cwd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileListMode {
+    Tree,
+    Marked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReminderField {
+    Title,
+    Due,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReminderEditorState {
+    pub path: PathBuf,
+    pub title: String,
+    pub due: String,
+    pub field: ReminderField,
+}
+
+impl Default for ReminderEditorState {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::new(),
+            title: String::new(),
+            due: Local::now().date_naive().format("%Y-%m-%d").to_string(),
+            field: ReminderField::Title,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +184,8 @@ pub struct App {
     pub root_path: PathBuf,
     pub tree: FileTree,
     pub visible_entries: Vec<VisibleEntry>,
+    pub file_list_mode: FileListMode,
+    pub marked_paths: HashSet<PathBuf>,
     pub selected_path: Option<PathBuf>,
     pub selected_index: usize,
     pub expanded_directories: HashSet<PathBuf>,
@@ -168,6 +205,9 @@ pub struct App {
     pub rename: RenameState,
     pub prompt: PromptState,
     pub agent_prompt: AgentPromptState,
+    pub reminder_editor: ReminderEditorState,
+    pub reminders: ReminderStore,
+    pub reminder_list_selected: usize,
     pub status_message: Option<String>,
     pub should_quit: bool,
     next_tab_id: u64,
@@ -213,11 +253,20 @@ impl App {
             .and_then(|default| tabs.iter().position(|tab| tab.title == default))
             .unwrap_or(0);
         let input_mode = base_mode_for_tab(&tabs[active_tab]);
+        let (reminders, reminder_status) = match ReminderStore::load(&root_path) {
+            Ok(reminders) => (reminders, None),
+            Err(error) => (
+                ReminderStore::empty(&root_path),
+                Some(format!("Reminders unavailable: {error:#}")),
+            ),
+        };
 
         Ok(Self {
             root_path,
             tree,
             visible_entries,
+            file_list_mode: FileListMode::Tree,
+            marked_paths: HashSet::new(),
             selected_path,
             selected_index: 0,
             expanded_directories,
@@ -237,10 +286,13 @@ impl App {
             rename: RenameState::default(),
             prompt: PromptState::default(),
             agent_prompt: AgentPromptState::default(),
-            status_message: None,
+            reminder_editor: ReminderEditorState::default(),
+            reminders,
+            reminder_list_selected: 0,
+            status_message: reminder_status.clone(),
             should_quit: false,
             next_tab_id,
-            status_set_at: None,
+            status_set_at: reminder_status.as_ref().map(|_| Instant::now()),
             confirm_tab: None,
         })
     }
@@ -322,6 +374,14 @@ impl App {
                 self.handle_agent_prompt_key(event, event_tx);
                 return None;
             }
+            InputMode::ReminderEditor => {
+                self.handle_reminder_editor_key(event);
+                return None;
+            }
+            InputMode::Reminders => {
+                self.handle_reminders_key(event);
+                return None;
+            }
             InputMode::Repository | InputMode::Terminal => {}
         }
 
@@ -377,13 +437,21 @@ impl App {
                     .text
                     .push_str(&normalize_paste_newlines(&text));
             }
+            InputMode::ReminderEditor => {
+                let text = paste_single_line(&text);
+                match self.reminder_editor.field {
+                    ReminderField::Title => self.reminder_editor.title.push_str(&text),
+                    ReminderField::Due => self.reminder_editor.due.push_str(&text),
+                }
+            }
             InputMode::Repository
             | InputMode::CommandPrefix
             | InputMode::FileActions
             | InputMode::ConfirmStop
             | InputMode::ConfirmRestart
             | InputMode::ConfirmQuit
-            | InputMode::Help => {}
+            | InputMode::Help
+            | InputMode::Reminders => {}
         }
     }
 
@@ -407,7 +475,9 @@ impl App {
             | InputMode::ConfirmQuit
             | InputMode::Help
             | InputMode::PromptOverlay
-            | InputMode::AgentPrompt => {}
+            | InputMode::AgentPrompt
+            | InputMode::ReminderEditor
+            | InputMode::Reminders => {}
         }
     }
 
@@ -564,6 +634,35 @@ impl App {
         self.visible_entries.get(self.selected_index)
     }
 
+    pub fn is_marked(&self, path: &Path) -> bool {
+        self.marked_paths.contains(path)
+    }
+
+    pub fn active_reminder_count(&self, path: &Path) -> usize {
+        self.reminders.active_for_path(path).len()
+    }
+
+    pub fn has_active_reminder_under(&self, path: &Path) -> bool {
+        self.reminders.has_active_under_path(path)
+    }
+
+    pub fn reminder_status_label(reminder: &Reminder) -> &'static str {
+        if reminder.done {
+            return "done";
+        }
+        let Some(due) = reminder.due_date() else {
+            return "invalid";
+        };
+        let today = Local::now().date_naive();
+        if due < today {
+            "overdue"
+        } else if due == today {
+            "today"
+        } else {
+            "open"
+        }
+    }
+
     pub fn selected_path(&self) -> Option<&Path> {
         self.selected_path.as_deref()
     }
@@ -664,6 +763,9 @@ impl App {
             KeyAction::ToggleHidden => self.toggle_hidden(),
             KeyAction::Quit | KeyAction::CtrlC => self.request_quit_confirmation(),
             KeyAction::ToggleMarkdown => self.toggle_markdown(),
+            KeyAction::ToggleMark => self.toggle_selected_mark(),
+            KeyAction::ToggleMarkedFilter => self.toggle_marked_filter(),
+            KeyAction::Reminders => self.open_reminders(),
             KeyAction::PreviewPageDown => self.preview.scroll_page_down(),
             KeyAction::PreviewPageUp => self.preview.scroll_page_up(),
             KeyAction::PreviewLineDown => self.preview.scroll_lines(1),
@@ -1018,7 +1120,125 @@ impl App {
                 modifiers: KeyModifiers::NONE,
                 ..
             } => self.open_selected_file_in_terminal_editor(event_tx),
+            KeyEvent {
+                code: KeyCode::Char('m'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.toggle_selected_mark(),
+            KeyEvent {
+                code: KeyCode::Char('M'),
+                modifiers: KeyModifiers::SHIFT,
+                ..
+            } => self.toggle_marked_filter(),
+            KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.open_reminder_editor(),
+            KeyEvent {
+                code: KeyCode::Char('l'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.open_reminders(),
             _ => self.set_status("Unknown file action"),
+        }
+    }
+
+    fn handle_reminder_editor_key(&mut self, event: KeyEvent) {
+        match event {
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } => {
+                self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+                self.set_status("Reminder cancelled");
+            }
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            }
+            | KeyEvent {
+                code: KeyCode::BackTab,
+                ..
+            } => {
+                self.reminder_editor.field = match self.reminder_editor.field {
+                    ReminderField::Title => ReminderField::Due,
+                    ReminderField::Due => ReminderField::Title,
+                };
+            }
+            KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            } => match self.reminder_editor.field {
+                ReminderField::Title => {
+                    self.reminder_editor.title.pop();
+                }
+                ReminderField::Due => {
+                    self.reminder_editor.due.pop();
+                }
+            },
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => self.submit_reminder(),
+            KeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+                ..
+            } => match self.reminder_editor.field {
+                ReminderField::Title => self.reminder_editor.title.push(ch),
+                ReminderField::Due => self.reminder_editor.due.push(ch),
+            },
+            _ => {}
+        }
+    }
+
+    fn handle_reminders_key(&mut self, event: KeyEvent) {
+        match event {
+            KeyEvent {
+                code: KeyCode::Esc | KeyCode::Char('q'),
+                ..
+            } => {
+                self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+                self.set_status("Reminder list closed");
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                if !self.reminders.reminders.is_empty() {
+                    self.reminder_list_selected =
+                        (self.reminder_list_selected + 1).min(self.reminders.reminders.len() - 1);
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Up, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('k'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.reminder_list_selected = self.reminder_list_selected.saturating_sub(1);
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => self.select_reminder_path(),
+            KeyEvent {
+                code: KeyCode::Char(' '),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.toggle_selected_reminder_done(),
+            KeyEvent {
+                code: KeyCode::Char('x'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.delete_selected_reminder(),
+            _ => {}
         }
     }
 
@@ -2205,11 +2425,22 @@ impl App {
             self.tree.nearest_existing_ancestor(path)
         };
 
-        if let Some(index) = self
+        let index = self
             .visible_entries
             .iter()
             .position(|entry| entry.path == target)
-        {
+            .or_else(|| {
+                if self.file_list_mode != FileListMode::Marked {
+                    return None;
+                }
+                self.file_list_mode = FileListMode::Tree;
+                self.refresh_visible_entries();
+                self.visible_entries
+                    .iter()
+                    .position(|entry| entry.path == target)
+            });
+
+        if let Some(index) = index {
             self.selected_index = index;
             self.selected_path = Some(target.clone());
             if reset_preview {
@@ -2291,6 +2522,144 @@ impl App {
         } else {
             "Markdown raw"
         });
+    }
+
+    fn toggle_selected_mark(&mut self) {
+        let Some(path) = self.selected_path.clone() else {
+            self.set_status("No file selected");
+            return;
+        };
+        if self.marked_paths.remove(&path) {
+            if self.file_list_mode == FileListMode::Marked {
+                self.refresh_visible_entries();
+            }
+            self.set_status(format!("Unmarked: {}", self.relative_display(&path)));
+        } else {
+            self.marked_paths.insert(path.clone());
+            self.set_status(format!("Marked: {}", self.relative_display(&path)));
+        }
+    }
+
+    fn toggle_marked_filter(&mut self) {
+        let previous = self.selected_path.clone();
+        self.file_list_mode = match self.file_list_mode {
+            FileListMode::Tree => FileListMode::Marked,
+            FileListMode::Marked => FileListMode::Tree,
+        };
+        self.refresh_visible_entries();
+        if let Some(path) = previous.as_deref() {
+            if self.file_list_mode == FileListMode::Tree || self.marked_paths.contains(path) {
+                self.select_path(path, true);
+            }
+        }
+        match self.file_list_mode {
+            FileListMode::Tree => self.set_status("Showing file tree"),
+            FileListMode::Marked => {
+                if self.visible_entries.is_empty() {
+                    self.set_status("No marked files");
+                } else {
+                    self.set_status("Showing marked files only");
+                }
+            }
+        }
+    }
+
+    fn open_reminder_editor(&mut self) {
+        let Some(path) = self.selected_path.clone() else {
+            self.set_status("No file selected");
+            return;
+        };
+        let title = selected_action_name(&path, "Review");
+        self.reminder_editor = ReminderEditorState {
+            path,
+            title,
+            due: Local::now().date_naive().format("%Y-%m-%d").to_string(),
+            field: ReminderField::Title,
+        };
+        self.input_mode = InputMode::ReminderEditor;
+        self.set_status("Reminder: title and due date, Enter save, Esc cancel");
+    }
+
+    fn submit_reminder(&mut self) {
+        let title = self.reminder_editor.title.trim().to_string();
+        if title.is_empty() {
+            self.set_status("Reminder title cannot be empty");
+            return;
+        }
+        let due = self.reminder_editor.due.trim().to_string();
+        if parse_due_date(&due).is_none() {
+            self.set_status("Due date must be YYYY-MM-DD");
+            return;
+        }
+        let path = self.reminder_editor.path.clone();
+        match self.reminders.add(title, &path, due) {
+            Ok(()) => {
+                self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+                self.reminder_editor = ReminderEditorState::default();
+                self.set_status(format!("Reminder added: {}", self.relative_display(&path)));
+            }
+            Err(error) => self.set_status(format!("Unable to save reminder: {error:#}")),
+        }
+    }
+
+    fn open_reminders(&mut self) {
+        self.input_mode = InputMode::Reminders;
+        if self.reminder_list_selected >= self.reminders.reminders.len() {
+            self.reminder_list_selected = self.reminders.reminders.len().saturating_sub(1);
+        }
+        self.set_status(format!(
+            "Reminders: {} in {}",
+            self.reminders.reminders.len(),
+            self.reminders.path.display()
+        ));
+    }
+
+    fn select_reminder_path(&mut self) {
+        let Some(reminder) = self
+            .reminders
+            .reminders
+            .get(self.reminder_list_selected)
+            .cloned()
+        else {
+            return;
+        };
+        let path = self.reminders.absolute_path(&reminder);
+        self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+        if path.starts_with(&self.root_path) {
+            self.file_list_mode = FileListMode::Tree;
+            self.select_path(&path, true);
+            self.set_status(format!(
+                "Selected reminder path: {}",
+                self.relative_display(&path)
+            ));
+        } else {
+            self.set_status(format!(
+                "Reminder is outside this view: {}",
+                path.to_string_lossy()
+            ));
+        }
+    }
+
+    fn toggle_selected_reminder_done(&mut self) {
+        if let Err(error) = self.reminders.toggle_done(self.reminder_list_selected) {
+            self.set_status(format!("Unable to update reminder: {error:#}"));
+            return;
+        }
+        if self.reminder_list_selected >= self.reminders.reminders.len() {
+            self.reminder_list_selected = self.reminders.reminders.len().saturating_sub(1);
+        }
+        self.set_status("Reminder updated");
+    }
+
+    fn delete_selected_reminder(&mut self) {
+        if let Err(error) = self.reminders.remove(self.reminder_list_selected) {
+            self.set_status(format!("Unable to delete reminder: {error:#}"));
+            return;
+        }
+        if self.reminder_list_selected >= self.reminders.reminders.len() {
+            self.reminder_list_selected = self.reminders.reminders.len().saturating_sub(1);
+        }
+        self.set_status("Reminder deleted");
     }
 
     fn preview_links(&self) -> Vec<preview::markdown::MarkdownLink> {
@@ -2532,7 +2901,12 @@ impl App {
     }
 
     fn refresh_visible_entries(&mut self) {
-        self.visible_entries = self.tree.visible_entries(&self.expanded_directories);
+        self.marked_paths
+            .retain(|path| self.tree.contains_path(path.as_path()));
+        self.visible_entries = match self.file_list_mode {
+            FileListMode::Tree => self.tree.visible_entries(&self.expanded_directories),
+            FileListMode::Marked => self.marked_visible_entries(),
+        };
         if self.selected_index >= self.visible_entries.len() {
             self.selected_index = self.visible_entries.len().saturating_sub(1);
         }
@@ -2540,6 +2914,30 @@ impl App {
             .visible_entries
             .get(self.selected_index)
             .map(|entry| entry.path.clone());
+    }
+
+    fn marked_visible_entries(&self) -> Vec<VisibleEntry> {
+        let mut entries = self
+            .marked_paths
+            .iter()
+            .filter_map(|path| {
+                let node = self.tree.node(path)?;
+                Some(VisibleEntry {
+                    path: path.clone(),
+                    name: self.relative_display(path),
+                    is_dir: node.is_dir,
+                    depth: 0,
+                    size: node.size,
+                    modified: node.modified,
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+        });
+        entries
     }
 
     fn agent_profile_indices(&self) -> Vec<usize> {
@@ -3030,6 +3428,61 @@ ignored_directories = ["cache"]
             app.tabs[1].as_terminal().unwrap().state,
             TerminalTabState::Failed { .. }
         ));
+    }
+
+    #[test]
+    fn marked_files_filter_is_session_only_and_flat() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        let first = src.join("main.rs");
+        let second = temp.path().join("README.md");
+        fs::write(&first, "fn main() {}\n").unwrap();
+        fs::write(&second, "# Readme\n").unwrap();
+        let first = first.canonicalize().unwrap();
+        let second = second.canonicalize().unwrap();
+        let mut app = app(&temp);
+
+        app.select_path(&first, true);
+        app.toggle_selected_mark();
+        app.toggle_marked_filter();
+
+        assert_eq!(app.file_list_mode, FileListMode::Marked);
+        assert_eq!(app.visible_entries.len(), 1);
+        assert_eq!(app.visible_entries[0].path, first);
+        assert_eq!(app.visible_entries[0].name, "src/main.rs");
+
+        app.toggle_marked_filter();
+
+        assert_eq!(app.file_list_mode, FileListMode::Tree);
+        assert!(app.marked_paths.contains(&first));
+        assert!(!app.marked_paths.contains(&second));
+    }
+
+    #[test]
+    fn reminders_persist_and_mark_parent_folders() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        let file = src.join("lib.rs");
+        fs::write(&file, "pub fn lib() {}\n").unwrap();
+        let src = src.canonicalize().unwrap();
+        let file = file.canonicalize().unwrap();
+        let mut app = app(&temp);
+
+        app.select_path(&file, true);
+        app.open_reminder_editor();
+        app.reminder_editor.title = "Review API".to_string();
+        app.reminder_editor.due = "2026-08-20".to_string();
+        app.submit_reminder();
+
+        assert_eq!(app.active_reminder_count(&file), 1);
+        assert!(app.has_active_reminder_under(&src));
+        assert!(temp.path().join(".devdeck/reminders.toml").exists());
+
+        let sub_store = ReminderStore::load(&src).unwrap();
+        assert_eq!(sub_store.reminders.len(), 1);
+        assert_eq!(sub_store.reminders[0].path, PathBuf::from("src/lib.rs"));
     }
 
     #[test]

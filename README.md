@@ -19,6 +19,8 @@ Interactive Git tab running `lazygit` inside DevDeck:
 - Repository tree navigation with hidden-file toggle and configurable generated-directory filtering
 - Plain text, source-code, image, binary metadata, and rendered Markdown previews with link navigation
 - Independent preview scrolling and automatic refresh on filesystem changes
+- Session-only marked file lists
+- Path reminders with due dates stored per workspace
 - Filename search
 - File and folder actions for rename, filename copy, relative/absolute path copy, command launch, and agent launch
 - External file opening
@@ -189,8 +191,11 @@ J / K          Preview line down/up
 Mouse wheel    Preview line scroll
 0 / $          Preview top/bottom
 ] / [          Next/previous Markdown preview link
+Space          Mark/unmark selected file or folder for this session
+M              Toggle marked-only file list
+T              Open reminders list
 y / Y          Copy relative/absolute path
-a              File actions: rename, copy name/path, run command, run configured agent
+a              File actions: rename, copy name/path, run command, run configured agent, reminders
 e              Open externally
 v              Open selected file in a temporary editor tab
 r / R          Reload file/tree
@@ -261,8 +266,14 @@ y / Y           Copy relative/absolute path
 !               Run a command with the selected path appended as the final argument
 g               Run a configured Codex or Claude agent with a prompt for the selected path
 v               Open selected file in a temporary editor tab
+m               Mark/unmark selected file or folder for this session
+M               Toggle marked-only file list
+d               Add reminder with due date for selected file or folder
+l               List reminders
 Esc             Cancel
 ```
+
+Reminders are stored under `.devdeck/reminders.toml` at the nearest existing reminder store, project config, or Git root. A `!` marker means the row has an active reminder; an `r` marker on a folder means a descendant has an active reminder.
 
 Prompt overlay:
 

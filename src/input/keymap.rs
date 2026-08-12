@@ -13,6 +13,9 @@ pub enum KeyAction {
     ToggleHidden,
     Quit,
     ToggleMarkdown,
+    ToggleMark,
+    ToggleMarkedFilter,
+    Reminders,
     PreviewPageDown,
     PreviewPageUp,
     PreviewLineDown,
@@ -116,6 +119,21 @@ pub fn map_key(event: KeyEvent) -> Option<KeyAction> {
             modifiers: KeyModifiers::NONE,
             ..
         } => Some(KeyAction::ToggleHidden),
+        KeyEvent {
+            code: KeyCode::Char(' '),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => Some(KeyAction::ToggleMark),
+        KeyEvent {
+            code: KeyCode::Char('M'),
+            modifiers: KeyModifiers::SHIFT,
+            ..
+        } => Some(KeyAction::ToggleMarkedFilter),
+        KeyEvent {
+            code: KeyCode::Char('T'),
+            modifiers: KeyModifiers::SHIFT,
+            ..
+        } => Some(KeyAction::Reminders),
         KeyEvent {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::NONE,

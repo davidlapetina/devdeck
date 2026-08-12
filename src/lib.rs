@@ -6,6 +6,7 @@ pub mod filesystem;
 pub mod input;
 pub mod preview;
 pub mod pty;
+pub mod reminders;
 pub mod search;
 pub mod session;
 pub mod tabs;
