@@ -16,7 +16,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     if app.input_mode == InputMode::CommandPrefix {
         let paragraph = Paragraph::new(
-            "COMMAND | 1..9 tab | n/p tab | c new | x stop | r restart | e reload | q quit | ? help",
+            "COMMAND | 1..9 tab | n/p tab | c new | x stop | r restart | e reload | m mouse | q quit | ? help",
         )
         .style(Style::default().fg(Color::Yellow).bg(Color::Black));
         frame.render_widget(paragraph, area);
@@ -99,7 +99,7 @@ fn render_terminal_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ""
     };
     let help = match terminal.state {
-        TerminalTabState::Running => "Ctrl-b commands while running",
+        TerminalTabState::Running => "Alt-m mouse | Ctrl-b commands",
         TerminalTabState::NotStarted => "Enter start | 1..9/Tab tabs",
         TerminalTabState::Starting => "starting",
         TerminalTabState::Exited { .. } | TerminalTabState::Failed { .. } => {

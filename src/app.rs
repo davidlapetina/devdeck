@@ -196,6 +196,7 @@ pub struct App {
     pub ignored_directories: Vec<String>,
     pub watch_enabled: bool,
     pub markdown_rendered: bool,
+    pub mouse_capture_enabled: bool,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
     pub sessions: SessionRegistry,
@@ -277,6 +278,7 @@ impl App {
             ignored_directories,
             watch_enabled,
             markdown_rendered: true,
+            mouse_capture_enabled: false,
             tabs,
             active_tab,
             sessions: SessionRegistry::new(),
@@ -385,10 +387,15 @@ impl App {
             InputMode::Repository | InputMode::Terminal => {}
         }
 
+        if is_mouse_toggle_key(event) {
+            self.toggle_mouse_capture();
+            return None;
+        }
+
         if is_ctrl_b(event) {
             self.input_mode = InputMode::CommandPrefix;
             self.set_status(
-                "COMMAND | 1..9 tab | n/p tab | c new | x stop | r restart | e reload | q quit | ? help",
+                "COMMAND | 1..9 tab | n/p tab | c new | x stop | r restart | e reload | m mouse | q quit | ? help",
             );
             return None;
         }
@@ -956,6 +963,10 @@ impl App {
                 code: KeyCode::Char('e'),
                 ..
             } => self.reload_configuration(),
+            KeyEvent {
+                code: KeyCode::Char('m'),
+                ..
+            } => self.toggle_mouse_capture(),
             KeyEvent {
                 code: KeyCode::Char('?'),
                 ..
@@ -2524,6 +2535,15 @@ impl App {
         });
     }
 
+    fn toggle_mouse_capture(&mut self) {
+        self.mouse_capture_enabled = !self.mouse_capture_enabled;
+        self.set_status(if self.mouse_capture_enabled {
+            "Mouse mode enabled: wheel scroll active, terminal text selection disabled"
+        } else {
+            "Mouse mode disabled: terminal text selection restored"
+        });
+    }
+
     fn toggle_selected_mark(&mut self) {
         let Some(path) = self.selected_path.clone() else {
             self.set_status("No file selected");
@@ -3114,6 +3134,12 @@ fn is_ctrl_g(event: KeyEvent) -> bool {
     )
 }
 
+fn is_mouse_toggle_key(event: KeyEvent) -> bool {
+    matches!(event.code, KeyCode::Char('m') | KeyCode::Char('M'))
+        && (event.modifiers.contains(KeyModifiers::ALT)
+            || event.modifiers.contains(KeyModifiers::CONTROL))
+}
+
 fn next_launcher_field(field: LauncherField) -> LauncherField {
     match field {
         LauncherField::Source => LauncherField::Name,
@@ -3204,6 +3230,47 @@ mod tests {
         let notes = temp.path().canonicalize().unwrap().join("notes.md");
         app.select_path(&notes, true);
         assert!(!app.markdown_rendered);
+    }
+
+    #[test]
+    fn mouse_capture_defaults_off_and_toggles_directly() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        let (tx, _rx) = crate::event::channel();
+
+        assert!(!app.mouse_capture_enabled);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT), &tx);
+
+        assert!(app.mouse_capture_enabled);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Mouse mode enabled: wheel scroll active, terminal text selection disabled")
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT), &tx);
+
+        assert!(!app.mouse_capture_enabled);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Mouse mode disabled: terminal text selection restored")
+        );
+    }
+
+    #[test]
+    fn command_prefix_toggles_mouse_capture() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE), &tx);
+
+        assert!(app.mouse_capture_enabled);
+        assert_eq!(app.input_mode, InputMode::Repository);
     }
 
     #[test]

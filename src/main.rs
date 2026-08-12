@@ -70,6 +70,8 @@ fn run_loop(
     event_tx: event::EventSender,
     event_rx: event::EventReceiver,
 ) -> Result<()> {
+    let mut terminal_mouse_capture = false;
+
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
@@ -100,6 +102,12 @@ fn run_loop(
         while let Ok(event) = event_rx.try_recv() {
             handle_app_event(terminal, app, &event_tx, event)?;
         }
+
+        sync_mouse_capture(
+            terminal,
+            &mut terminal_mouse_capture,
+            app.mouse_capture_enabled,
+        )?;
     }
 
     Ok(())
@@ -154,12 +162,7 @@ fn current_terminal_dimensions(terminal: &AppTerminal) -> Result<devdeck::app::T
 fn setup_terminal() -> Result<AppTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture
-    )?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
@@ -178,16 +181,36 @@ fn restore_terminal(terminal: &mut AppTerminal) -> Result<()> {
     Ok(())
 }
 
-fn resume_terminal(terminal: &mut AppTerminal) -> Result<()> {
+fn resume_terminal(terminal: &mut AppTerminal, mouse_capture_enabled: bool) -> Result<()> {
     enable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture
+        EnableBracketedPaste
     )?;
+    if mouse_capture_enabled {
+        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+    }
     terminal.hide_cursor()?;
     terminal.clear()?;
+    Ok(())
+}
+
+fn sync_mouse_capture(
+    terminal: &mut AppTerminal,
+    terminal_mouse_capture: &mut bool,
+    app_mouse_capture: bool,
+) -> Result<()> {
+    if *terminal_mouse_capture == app_mouse_capture {
+        return Ok(());
+    }
+
+    if app_mouse_capture {
+        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+    } else {
+        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    }
+    *terminal_mouse_capture = app_mouse_capture;
     Ok(())
 }
 
@@ -201,7 +224,7 @@ fn handle_external_open(
             restore_terminal(terminal)?;
             let result = open_with_os_arg(&target);
             std::thread::sleep(Duration::from_millis(25));
-            resume_terminal(terminal)?;
+            resume_terminal(terminal, app.mouse_capture_enabled)?;
 
             match result {
                 Ok(()) => app.set_status(format!("Opened: {target}")),
@@ -230,7 +253,7 @@ fn handle_external_open(
         open_with_os(&path)
     };
     std::thread::sleep(Duration::from_millis(25));
-    resume_terminal(terminal)?;
+    resume_terminal(terminal, app.mouse_capture_enabled)?;
 
     match result {
         Ok(()) => app.set_status(format!("Opened: {}", app.relative_display(&path))),

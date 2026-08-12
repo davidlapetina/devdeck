@@ -188,7 +188,8 @@ m              Toggle rendered/raw Markdown
 Ctrl-d         Preview page down
 Ctrl-u         Preview page up
 J / K          Preview line down/up
-Mouse wheel    Preview line scroll
+Alt-m          Toggle mouse-wheel mode
+Mouse wheel    Preview line scroll when mouse-wheel mode is enabled
 0 / $          Preview top/bottom
 ] / [          Next/previous Markdown preview link
 Space          Mark/unmark selected file or folder for this session
@@ -208,7 +209,7 @@ q              Quit with confirmation
 
 When a terminal tab is running, normal keyboard input goes directly to the child process. Use the command prefix for DevDeck commands that would otherwise be typed into Claude, Codex, a shell, Vim, Less, or another terminal program.
 
-The mouse wheel scrolls terminal scrollback for normal shell output. In full-screen terminal apps that use the alternate screen, the wheel sends PageUp/PageDown to the child process.
+Native terminal text selection is available by default. Use `Alt-m` or `Ctrl-b m` to toggle mouse-wheel mode; while enabled, the mouse wheel scrolls file previews and terminal scrollback, and mouse events are captured by DevDeck instead of the terminal. In full-screen terminal apps that use the alternate screen, the wheel sends PageUp/PageDown to the child process.
 
 Command prefix:
 
@@ -221,6 +222,7 @@ Ctrl-b c        Create temporary command tab from a known command, shell, or cus
 Ctrl-b x        Stop or close current terminal tab
 Ctrl-b r        Restart current terminal tab
 Ctrl-b e        Reload configuration
+Ctrl-b m        Toggle mouse-wheel mode
 Ctrl-b q        Quit with confirmation
 Ctrl-b ?        Help overlay
 Ctrl-b ,        Rename temporary tab
