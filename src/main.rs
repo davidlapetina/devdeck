@@ -12,7 +12,7 @@ use clap::Parser;
 use crossterm::{
     event::{
         self as crossterm_event, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, Event as CrosstermEvent,
+        EnableMouseCapture, Event as CrosstermEvent, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -131,7 +131,18 @@ fn handle_app_event(
             let dimensions = ui::layout::terminal_dimensions(ui::layout::areas(area).content);
             app.resize_active_terminal(dimensions);
         }
-        AppEvent::Mouse(mouse) => app.handle_mouse(mouse),
+        AppEvent::Mouse(mouse) => {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let size = terminal.size()?;
+                let area = Rect::new(0, 0, size.width, size.height);
+                let areas = ui::layout::areas(area);
+                if let Some(index) = ui::tabs::hit_test(areas.tabs, app, mouse.column, mouse.row) {
+                    app.handle_tab_click(index, event_tx);
+                    return Ok(());
+                }
+            }
+            app.handle_mouse(mouse);
+        }
         AppEvent::FileSystem(batch) => app.handle_filesystem_event(batch),
         AppEvent::PtyOutput { session_id, bytes } => app.handle_pty_output(session_id, &bytes),
         AppEvent::ProcessExited {

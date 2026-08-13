@@ -34,6 +34,7 @@ const FAST_RESTART_WINDOW: Duration = Duration::from_secs(5);
 const MAX_FAST_RESTARTS: u8 = 3;
 const BACKGROUND_OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
 const MOUSE_SCROLL_LINES: usize = 3;
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(450);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalOpen {
@@ -93,6 +94,12 @@ pub struct ReminderEditorState {
     pub title: String,
     pub due: String,
     pub field: ReminderField,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TabClick {
+    index: usize,
+    at: Instant,
 }
 
 impl Default for ReminderEditorState {
@@ -214,6 +221,7 @@ pub struct App {
     next_tab_id: u64,
     status_set_at: Option<Instant>,
     confirm_tab: Option<usize>,
+    last_tab_click: Option<TabClick>,
 }
 
 impl App {
@@ -296,6 +304,7 @@ impl App {
             next_tab_id,
             status_set_at: reminder_status.as_ref().map(|_| Instant::now()),
             confirm_tab: None,
+            last_tab_click: None,
         })
     }
 
@@ -521,6 +530,26 @@ impl App {
                     last_output_at: now,
                 };
             }
+        }
+    }
+
+    pub fn handle_tab_click(&mut self, index: usize, event_tx: &EventSender) {
+        if index >= self.tabs.len() {
+            return;
+        }
+
+        let now = Instant::now();
+        let double_click = self.last_tab_click.is_some_and(|click| {
+            click.index == index && now.duration_since(click.at) <= DOUBLE_CLICK_WINDOW
+        });
+
+        self.select_tab(index, event_tx);
+
+        if double_click {
+            self.last_tab_click = None;
+            self.open_rename_tab();
+        } else {
+            self.last_tab_click = Some(TabClick { index, at: now });
         }
     }
 
@@ -3271,6 +3300,42 @@ mod tests {
 
         assert!(app.mouse_capture_enabled);
         assert_eq!(app.input_mode, InputMode::Repository);
+    }
+
+    #[test]
+    fn tab_click_selects_tab() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Shell"),
+            false,
+        ));
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_tab_click(1, &tx);
+
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.input_mode, InputMode::Terminal);
+    }
+
+    #[test]
+    fn double_tab_click_opens_rename_for_temporary_tab() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Scratch"),
+            true,
+        ));
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_tab_click(1, &tx);
+        app.handle_tab_click(1, &tx);
+
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.input_mode, InputMode::RenameTab);
+        assert_eq!(app.rename.value, "Scratch");
     }
 
     #[test]

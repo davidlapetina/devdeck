@@ -456,6 +456,8 @@ fn render_help(frame: &mut Frame<'_>) {
         Line::from("Ctrl-b Ctrl-b Send literal Ctrl-b"),
         Line::from("Ctrl-g        Prompt overlay for active terminal"),
         Line::from(""),
+        Line::from("Mouse mode: click tabs to switch, double-click temporary tabs to rename."),
+        Line::from(""),
         Line::from(
             "Tab markers: > shell prompt, * recent output, . quiet output, ! exited/failed.",
         ),
