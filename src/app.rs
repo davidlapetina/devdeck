@@ -155,16 +155,11 @@ pub struct RenameState {
     pub target: RenameTarget,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum RenameTarget {
+    #[default]
     Tab,
     Path(PathBuf),
-}
-
-impl Default for RenameTarget {
-    fn default() -> Self {
-        Self::Tab
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -736,11 +731,11 @@ impl App {
     pub fn relative_display(&self, path: &Path) -> String {
         path.strip_prefix(&self.root_path)
             .ok()
-            .and_then(|relative| {
+            .map(|relative| {
                 if relative.as_os_str().is_empty() {
-                    Some(".".to_string())
+                    ".".to_string()
                 } else {
-                    Some(relative.to_string_lossy().to_string())
+                    relative.to_string_lossy().to_string()
                 }
             })
             .unwrap_or_else(|| path.to_string_lossy().to_string())
@@ -777,9 +772,7 @@ impl App {
             return None;
         }
 
-        let Some(action) = map_key(event) else {
-            return None;
-        };
+        let action = map_key(event)?;
 
         match action {
             KeyAction::MoveDown => self.move_selection(1),
@@ -2139,11 +2132,7 @@ impl App {
                         let running = terminal.state.is_running();
                         terminal.profile = profile;
                         terminal.removed_from_config = false;
-                        if running {
-                            terminal.requires_restart = true;
-                        } else {
-                            terminal.requires_restart = false;
-                        }
+                        terminal.requires_restart = running;
                     }
                 }
             } else {
@@ -2749,9 +2738,7 @@ impl App {
     }
 
     fn activate_preview_link(&mut self) -> Option<ExternalOpen> {
-        let Some(index) = self.preview_link_index else {
-            return None;
-        };
+        let index = self.preview_link_index?;
         let links = self.preview_links();
         let Some(link) = links.get(index) else {
             self.preview_link_index = None;

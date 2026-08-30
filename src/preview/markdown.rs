@@ -476,10 +476,10 @@ impl Renderer {
 
         for (row_index, row) in table.rows.iter().enumerate() {
             let mut line = String::new();
-            for column in 0..column_count {
+            for (column, width) in widths.iter().enumerate().take(column_count) {
                 let cell = row.get(column).map(String::as_str).unwrap_or("");
-                let padding = widths[column]
-                    .saturating_sub(cell.chars().filter_map(UnicodeWidthChar::width).sum());
+                let padding =
+                    width.saturating_sub(cell.chars().filter_map(UnicodeWidthChar::width).sum());
                 if column > 0 {
                     line.push_str(" | ");
                 }
@@ -587,11 +587,9 @@ fn slugify_heading(text: &str) -> String {
         if ch.is_ascii_alphanumeric() {
             slug.push(ch);
             previous_dash = false;
-        } else if ch.is_whitespace() || ch == '-' {
-            if !slug.is_empty() && !previous_dash {
-                slug.push('-');
-                previous_dash = true;
-            }
+        } else if (ch.is_whitespace() || ch == '-') && !slug.is_empty() && !previous_dash {
+            slug.push('-');
+            previous_dash = true;
         }
     }
 

@@ -78,6 +78,18 @@ Run the test suite:
 cargo test
 ```
 
+Run the local release gate and install the binary on macOS or Linux:
+
+```bash
+./scripts/local-release.sh
+```
+
+The script checks formatting, runs Clippy with warnings denied, runs the test
+suite, builds the release binary, then installs it to `$HOME/.local/bin/devdeck`
+by default. On macOS, it uses ad-hoc signing unless `CODESIGN_IDENTITY` is set
+to a specific signing identity. Set `DEVDECK_INSTALL_DIR` to install somewhere
+else.
+
 Run from the checkout:
 
 ```bash

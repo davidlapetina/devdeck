@@ -136,8 +136,8 @@ fn update_terminal_output_metadata(session: &mut TerminalSession, bytes: &[u8]) 
 }
 
 fn update_bracketed_paste_mode(session: &mut TerminalSession, combined: &[u8]) {
-    let enable_at = find_last(&combined, BRACKETED_PASTE_ENABLE);
-    let disable_at = find_last(&combined, BRACKETED_PASTE_DISABLE);
+    let enable_at = find_last(combined, BRACKETED_PASTE_ENABLE);
+    let disable_at = find_last(combined, BRACKETED_PASTE_DISABLE);
     match (enable_at, disable_at) {
         (Some(enable), Some(disable)) => session.bracketed_paste_enabled = enable > disable,
         (Some(_), None) => session.bracketed_paste_enabled = true,

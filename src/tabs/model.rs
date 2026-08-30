@@ -34,7 +34,7 @@ impl Tab {
         Self {
             id,
             title,
-            content: TabContent::Terminal(TerminalTab {
+            content: TabContent::Terminal(Box::new(TerminalTab {
                 profile,
                 session_id: None,
                 state: TerminalTabState::NotStarted,
@@ -43,7 +43,7 @@ impl Tab {
                 restart_attempts: 0,
                 last_started_at: None,
                 pending_restart_at: None,
-            }),
+            })),
             activity: ActivityState::None,
             temporary,
             return_to_files_on_exit: false,
@@ -52,14 +52,14 @@ impl Tab {
 
     pub fn terminal_mut(&mut self) -> Option<&mut TerminalTab> {
         match &mut self.content {
-            TabContent::Terminal(tab) => Some(tab),
+            TabContent::Terminal(tab) => Some(tab.as_mut()),
             TabContent::Repository => None,
         }
     }
 
     pub fn as_terminal(&self) -> Option<&TerminalTab> {
         match &self.content {
-            TabContent::Terminal(tab) => Some(tab),
+            TabContent::Terminal(tab) => Some(tab.as_ref()),
             TabContent::Repository => None,
         }
     }
@@ -68,7 +68,7 @@ impl Tab {
 #[derive(Debug, Clone)]
 pub enum TabContent {
     Repository,
-    Terminal(TerminalTab),
+    Terminal(Box<TerminalTab>),
 }
 
 #[derive(Debug, Clone)]
