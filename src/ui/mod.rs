@@ -1,9 +1,9 @@
 use ratatui::{prelude::*, widgets::*};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, InputMode, LauncherField, ReminderField},
-    tabs::TabContent,
+    tabs::{ActivityState, TabContent, TerminalTabState},
 };
 
 pub mod layout;
@@ -14,13 +14,17 @@ pub mod terminal;
 pub mod tree;
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
-    let areas = layout::areas(frame.area());
+    let areas = layout::areas_for_files(frame.area(), app.maximized_files_pane);
     tabs::render(frame, areas.tabs, app);
 
     match app.active_tab().map(|tab| &tab.content) {
         Some(TabContent::Repository) | None => {
-            tree::render(frame, areas.files, app);
-            preview::render(frame, areas.preview, app);
+            if areas.files.width > 0 && areas.files.height > 0 {
+                tree::render(frame, areas.files, app);
+            }
+            if areas.preview.width > 0 && areas.preview.height > 0 {
+                preview::render(frame, areas.preview, app);
+            }
         }
         Some(TabContent::Terminal(_)) => {
             let dimensions = layout::terminal_dimensions(areas.content);
@@ -31,12 +35,18 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     status::render(frame, areas.status, app);
 
-    if app.search.active {
+    if app.search.active
+        && matches!(
+            app.active_tab().map(|tab| &tab.content),
+            Some(TabContent::Repository)
+        )
+    {
         render_search(frame, app);
     }
 
     match app.input_mode {
         InputMode::TabLauncher => render_launcher(frame, app),
+        InputMode::TabSwitcher => render_tab_switcher(frame, app),
         InputMode::RenameTab => render_rename(frame, app),
         InputMode::RenamePath => render_rename(frame, app),
         InputMode::FileActions => render_file_actions(frame, app),
@@ -49,13 +59,99 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         InputMode::ConfirmQuit => {
             render_confirm(frame, "Quit DevDeck?", "Enter/y quit | Esc/n cancel")
         }
-        InputMode::Help => render_help(frame),
+        InputMode::Help => render_help(frame, app),
         InputMode::PromptOverlay => render_prompt(frame, app),
         InputMode::AgentPrompt => render_agent_prompt(frame, app),
         InputMode::ReminderEditor => render_reminder_editor(frame, app),
         InputMode::Reminders => render_reminders(frame, app),
         InputMode::Repository | InputMode::Terminal | InputMode::CommandPrefix => {}
     }
+}
+
+fn render_tab_switcher(frame: &mut Frame<'_>, app: &App) {
+    let area = centered_rect(68, 62, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Switch Tab ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("Filter: "),
+            Span::styled(
+                app.tab_switcher.query.clone(),
+                Style::default().fg(Color::Yellow),
+            ),
+        ])),
+        chunks[0],
+    );
+
+    let matches = app.tab_switcher_matches();
+    if matches.is_empty() {
+        frame.render_widget(Paragraph::new("No matching tabs"), chunks[1]);
+    } else {
+        let height = chunks[1].height as usize;
+        let selected = app.tab_switcher.selected.min(matches.len() - 1);
+        let offset = selected.saturating_sub(height.saturating_sub(1));
+        let items = matches
+            .iter()
+            .skip(offset)
+            .take(height)
+            .enumerate()
+            .map(|(visible_index, index)| {
+                let row = offset + visible_index;
+                let tab = &app.tabs[*index];
+                let current = if *index == app.active_tab { "●" } else { " " };
+                let state = match &tab.content {
+                    TabContent::Repository => "files".to_string(),
+                    TabContent::Terminal(terminal) => {
+                        let state = match terminal.state {
+                            TerminalTabState::NotStarted => "idle",
+                            TerminalTabState::Starting => "starting",
+                            TerminalTabState::Running => "running",
+                            TerminalTabState::Exited { .. } => "exited",
+                            TerminalTabState::Failed { .. } => "failed",
+                        };
+                        let activity = match tab.activity {
+                            ActivityState::None => "",
+                            ActivityState::OutputActive { .. } => " · output",
+                            ActivityState::OutputQuiet => " · quiet",
+                        };
+                        format!("{state}{activity}")
+                    }
+                };
+                let style = if row == selected {
+                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(Span::styled(
+                    format!(
+                        "{current} {:>2}  {} {state}",
+                        index + 1,
+                        fixed_display_width(&tab.title, 24)
+                    ),
+                    style,
+                )))
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(List::new(items), chunks[1]);
+    }
+
+    frame.render_widget(
+        Paragraph::new("Type to filter · ↑/↓ select · Enter open · Esc cancel"),
+        chunks[2],
+    );
+    set_input_cursor(frame, chunks[0], 0, "Filter: ", &app.tab_switcher.query);
 }
 
 fn render_search(frame: &mut Frame<'_>, app: &App) {
@@ -423,40 +519,76 @@ fn render_confirm(frame: &mut Frame<'_>, title: &str, help: &str) {
     );
 }
 
-fn render_help(frame: &mut Frame<'_>) {
-    let area = centered_rect(78, 70, frame.area());
+fn render_help(frame: &mut Frame<'_>, app: &mut App) {
+    let (area, body, footer) = help_areas(frame.area());
     frame.render_widget(Clear, area);
+    let text = help_lines(app);
+    let paragraph = Paragraph::new(text.clone()).wrap(Wrap { trim: true });
+    let total = paragraph.line_count(body.width);
+    let viewport = body.height as usize;
+    let max_scroll = total.saturating_sub(viewport);
+    app.help_scroll = app.help_scroll.min(max_scroll);
+    let start = if total == 0 { 0 } else { app.help_scroll + 1 };
+    let end = app.help_scroll.saturating_add(viewport).min(total);
     let block = Block::default()
-        .title(" Help ")
+        .title(format!(" Help · {start}–{end}/{total} "))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
-    let inner = block.inner(area);
     frame.render_widget(block, area);
-    let text = vec![
+    frame.render_widget(paragraph.scroll((app.help_scroll as u16, 0)), body);
+    frame.render_widget(
+        Paragraph::new("j/k scroll · PgUp/PgDn · g/G ends · Esc/Enter/q close")
+            .style(Style::default().fg(Color::Yellow)),
+        footer,
+    );
+}
+
+fn help_areas(frame_area: Rect) -> (Rect, Rect, Rect) {
+    let area = centered_rect(78, 70, frame_area);
+    let inner = area.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    (area, chunks[0], chunks[1])
+}
+
+fn help_lines(app: &App) -> Vec<Line<'static>> {
+    vec![
         Line::from("Files and inactive terminal tabs"),
         Line::from("1..9          Select tab by number"),
         Line::from("Tab/BackTab   Next/previous tab"),
+        Line::from(format!(
+            "{} / {}   Previous/next tab (configured)",
+            app.previous_tab_key(),
+            app.next_tab_key()
+        )),
+        Line::from("Alt-t         Search and switch tabs"),
+        Line::from("Alt-l         Switch to most recently used tab"),
         Line::from("c             New terminal tab"),
-        Line::from("Alt-m         Toggle mouse-wheel mode"),
+        Line::from("Alt-m         Cycle mouse policy: auto / selection / navigation"),
         Line::from("?             Help"),
         Line::from("q             Quit with confirmation"),
         Line::from(""),
         Line::from("Terminal command prefix, used while a process is running"),
         Line::from("Ctrl-b 1..9   Select tab"),
         Line::from("Ctrl-b n/p    Next/previous tab"),
+        Line::from("Ctrl-b t      Search and switch tabs"),
+        Line::from("Ctrl-b l      Switch to most recently used tab"),
         Line::from("Ctrl-b f      Files tab"),
         Line::from("Ctrl-b c      New terminal tab"),
         Line::from("Ctrl-b x      Stop or close current terminal tab"),
         Line::from("Ctrl-b r      Restart current terminal tab"),
         Line::from("Ctrl-b e      Reload configuration"),
-        Line::from("Ctrl-b m      Toggle mouse-wheel mode"),
+        Line::from("Ctrl-b m      Cycle mouse policy"),
         Line::from("Ctrl-b q      Quit with confirmation"),
         Line::from("Ctrl-b ,      Rename temporary tab"),
         Line::from("Ctrl-b ?      Help"),
         Line::from("Ctrl-b Ctrl-b Send literal Ctrl-b"),
         Line::from("Ctrl-g        Prompt overlay for active terminal"),
         Line::from(""),
-        Line::from("Mouse mode: click tabs to switch, double-click temporary tabs to rename."),
+        Line::from("Mouse auto: navigate Files, preserve native selection in terminal tabs."),
+        Line::from("Navigation: click tabs/tree and wheel panes; Selection: never capture."),
         Line::from(""),
         Line::from(
             "Tab markers: > shell prompt, * recent output, . quiet output, ! exited/failed.",
@@ -465,10 +597,13 @@ fn render_help(frame: &mut Frame<'_>) {
         Line::from("Files: v opens selected file in an editor tab, e opens externally."),
         Line::from("Files: a opens file actions for rename, path copy, command, and agent launch."),
         Line::from("Files: Space marks files, M filters to marked files, T lists reminders."),
+        Line::from("Files: f focuses Preview; Esc returns to Tree; z maximizes/restores focus."),
+        Line::from("Preview: j/k or arrows scroll; Ctrl-d/u pages; g/G goes top/bottom."),
+        Line::from("Preview: w toggles wrap; h/l scroll horizontally when unwrapped."),
+        Line::from("Preview: N toggles source line numbers; title shows position/progress."),
         Line::from("Files: ]/[ selects Markdown preview links, Enter opens the selected link."),
         Line::from("Esc, Enter, or q closes this help."),
-    ];
-    frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);
+    ]
 }
 
 fn render_prompt(frame: &mut Frame<'_>, app: &App) {
@@ -623,6 +758,35 @@ fn display_width(value: &str) -> u16 {
     UnicodeWidthStr::width(value).min(u16::MAX as usize) as u16
 }
 
+fn fixed_display_width(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let mut result = String::new();
+    let value_width = UnicodeWidthStr::width(value);
+    let content_width = if value_width > width {
+        width.saturating_sub(UnicodeWidthChar::width('…').unwrap_or(1))
+    } else {
+        width
+    };
+    let mut used = 0;
+    for ch in value.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > content_width {
+            break;
+        }
+        result.push(ch);
+        used += ch_width;
+    }
+    if value_width > width {
+        result.push('…');
+        used += UnicodeWidthChar::width('…').unwrap_or(1);
+    }
+    result.push_str(&" ".repeat(width.saturating_sub(used)));
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,5 +825,34 @@ mod tests {
         let position = multiline_input_cursor_position(area, "first\n").unwrap();
 
         assert_eq!(position, Position::new(2, 4));
+    }
+
+    #[test]
+    fn fixed_width_field_aligns_and_truncates_unicode_by_display_cells() {
+        let ascii = fixed_display_width("Shell", 8);
+        let wide = fixed_display_width("日本語", 8);
+        let truncated = fixed_display_width("日本語 terminal", 8);
+
+        assert_eq!(UnicodeWidthStr::width(ascii.as_str()), 8);
+        assert_eq!(UnicodeWidthStr::width(wide.as_str()), 8);
+        assert_eq!(UnicodeWidthStr::width(truncated.as_str()), 8);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn help_reserves_visible_controls_on_an_80_by_24_terminal() {
+        let (overlay, body, footer) = help_areas(Rect::new(0, 0, 80, 24));
+        assert!(overlay.width >= 60);
+        assert!(body.height > 0);
+        assert_eq!(footer.height, 1);
+        assert_eq!(footer.y, body.bottom());
+
+        let long_help = Paragraph::new(
+            (0..40)
+                .map(|index| Line::from(format!("Help line {index}")))
+                .collect::<Vec<_>>(),
+        )
+        .wrap(Wrap { trim: true });
+        assert!(long_help.line_count(body.width) > body.height as usize);
     }
 }

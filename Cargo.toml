@@ -1,6 +1,6 @@
 [package]
 name = "devdeck"
-version = "0.20.2"
+version = "0.21.0"
 edition = "2021"
 description = "A fast terminal repository explorer with live previews."
 license = "MIT"
@@ -20,10 +20,11 @@ image = { version = "0.25", default-features = false, features = [
     "tiff",
     "webp",
 ] }
+libc = "0.2"
 notify = "6"
 portable-pty = "0.8"
 pulldown-cmark = "0.9"
-ratatui = "0.29"
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 serde = { version = "1", features = ["derive"] }
 shellexpand = "3"
 shell-words = "1"
@@ -32,6 +33,7 @@ thiserror = "1"
 toml = "0.8"
 tui-term = "0.2"
 unicode-width = "0.1"
+unicode-segmentation = "1"
 vt100 = "0.15"
 
 [dev-dependencies]

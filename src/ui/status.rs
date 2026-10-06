@@ -1,4 +1,5 @@
 use ratatui::{prelude::*, widgets::*};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, InputMode},
@@ -16,7 +17,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     if app.input_mode == InputMode::CommandPrefix {
         let paragraph = Paragraph::new(
-            "COMMAND | 1..9 tab | n/p tab | c new | x stop | r restart | e reload | m mouse | q quit | ? help",
+            "COMMAND | 1..9 tab | n/p tab | t switcher | l last | c new | x stop | r restart | e reload | m mouse policy | q quit | ? help",
         )
         .style(Style::default().fg(Color::Yellow).bg(Color::Black));
         frame.render_widget(paragraph, area);
@@ -30,6 +31,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_files_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let (first_line, second_line) = files_status_lines(app, area.width as usize);
+    let text = Text::from(vec![Line::from(first_line), Line::from(second_line)]);
+    let paragraph = Paragraph::new(text).style(Style::default().fg(Color::White).bg(Color::Black));
+    frame.render_widget(paragraph, area);
+}
+
+fn files_status_lines(app: &App, width: usize) -> (String, String) {
     let path = app
         .selected_path()
         .map(|path| app.relative_display(path))
@@ -51,16 +59,110 @@ fn render_files_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         "md:raw"
     };
+    let mouse = format!("mouse:{}", app.mouse_policy.label());
+    let pane = app.files_pane.label();
+    let view = if app.preview_wrap_effective() {
+        "wrap"
+    } else {
+        "nowrap"
+    };
 
-    let first_line =
-        format!("Files | {path} | {kind} | {size} | {modified} | {watch} | {markdown}");
-    let second_line =
-        "j/k move  h/l expand  / search  a actions  m markdown  ]/[ links  v editor  e external  1..9/Tab tabs  c new  ? help  q quit"
-            .to_string();
+    // Interaction state comes first and is never displaced by long paths or metadata.
+    let required = vec![
+        "Files".to_string(),
+        format!("focus:{pane}"),
+        mouse,
+        view.to_string(),
+    ];
+    let optional = vec![
+        path,
+        kind.to_string(),
+        size,
+        modified,
+        watch.to_string(),
+        markdown.to_string(),
+    ];
+    let first_line = fit_segments(required, optional, width);
+    let controls = if app.files_pane == crate::app::FilesPane::Preview {
+        vec![
+            "Preview",
+            "Alt-t tabs",
+            "Alt-l last",
+            "j/k scroll",
+            "Ctrl-d/u page",
+            "g/G ends",
+            "w wrap",
+            "h/l horizontal",
+            "N numbers",
+            "z max",
+            "Esc tree",
+            "]/[ links",
+            "? help",
+        ]
+    } else {
+        vec![
+            "Tree",
+            "Alt-t tabs",
+            "Alt-l last",
+            "j/k move",
+            "h/l expand",
+            "f preview",
+            "z max",
+            "/ search",
+            "a actions",
+            "v editor",
+            "e external",
+            "? help",
+        ]
+    };
+    let second_line = fit_segments(
+        controls[..1]
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        controls[1..]
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        width,
+    );
+    (first_line, second_line)
+}
 
-    let text = Text::from(vec![Line::from(first_line), Line::from(second_line)]);
-    let paragraph = Paragraph::new(text).style(Style::default().fg(Color::White).bg(Color::Black));
-    frame.render_widget(paragraph, area);
+fn fit_segments(required: Vec<String>, optional: Vec<String>, width: usize) -> String {
+    let mut line = required.join(" | ");
+    if UnicodeWidthStr::width(line.as_str()) > width {
+        return truncate_display(&line, width);
+    }
+    for segment in optional {
+        let candidate = format!("{line} | {segment}");
+        if UnicodeWidthStr::width(candidate.as_str()) <= width {
+            line = candidate;
+        }
+    }
+    line
+}
+
+fn truncate_display(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let target = width.saturating_sub(1);
+    let mut used = 0;
+    let mut result = String::new();
+    for ch in value.chars() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or_default();
+        if used + char_width > target {
+            break;
+        }
+        result.push(ch);
+        used += char_width;
+    }
+    result.push('…');
+    result
 }
 
 fn render_terminal_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -81,6 +183,7 @@ fn render_terminal_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
         "{}x{}",
         app.terminal_dimensions.cols, app.terminal_dimensions.rows
     );
+    let mouse = format!("mouse:{}", app.mouse_policy.label());
     let state = match &terminal.state {
         TerminalTabState::NotStarted => "not started".to_string(),
         TerminalTabState::Starting => "starting".to_string(),
@@ -99,17 +202,61 @@ fn render_terminal_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ""
     };
     let help = match terminal.state {
-        TerminalTabState::Running => "Alt-m mouse | Ctrl-b commands",
-        TerminalTabState::NotStarted => "Enter start | 1..9/Tab tabs",
+        TerminalTabState::Running => "Alt-m mouse policy | Ctrl-b commands",
+        TerminalTabState::NotStarted => "Enter start | Alt-t tabs | Alt-l last | 1..9/Tab tabs",
         TerminalTabState::Starting => "starting",
         TerminalTabState::Exited { .. } | TerminalTabState::Failed { .. } => {
-            "Enter/r restart | x close/reset | 1..9/Tab tabs"
+            "Enter/r restart | x close/reset | Alt-t tabs | Alt-l last | 1..9/Tab tabs"
         }
     };
     let line = format!(
-        "{} | {state} | {pid} | {dimensions} | {help}{extra}",
+        "{} | {state} | {pid} | {dimensions} | {mouse} | {help}{extra}",
         tab.title
     );
     let paragraph = Paragraph::new(line).style(Style::default().fg(Color::White).bg(Color::Black));
     frame.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prioritized_status_fits_small_terminal_width() {
+        let line = fit_segments(
+            vec![
+                "Files".to_string(),
+                "focus:preview".to_string(),
+                "mouse:auto".to_string(),
+                "nowrap".to_string(),
+            ],
+            vec!["a/very/long/path/that/must/not/displace/state.rs".to_string()],
+            40,
+        );
+        assert!(UnicodeWidthStr::width(line.as_str()) <= 40);
+        assert!(line.contains("focus:preview"));
+        assert!(line.contains("mouse:auto"));
+    }
+
+    #[test]
+    fn preview_controls_are_added_in_priority_order() {
+        let line = fit_segments(
+            vec!["Preview".to_string()],
+            [
+                "j/k scroll",
+                "w wrap",
+                "h/l horizontal",
+                "N numbers",
+                "z max",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            50,
+        );
+        assert!(UnicodeWidthStr::width(line.as_str()) <= 50);
+        assert!(line.contains("j/k scroll"));
+        assert!(line.contains("w wrap"));
+        assert!(line.contains("h/l horizontal"));
+    }
 }

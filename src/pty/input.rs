@@ -19,15 +19,15 @@ pub fn key_event_to_bytes(event: KeyEvent) -> Option<Vec<u8>> {
             let mut encoded = [0; 4];
             Some(ch.encode_utf8(&mut encoded).as_bytes().to_vec())
         }
-        KeyCode::Enter => Some(vec![b'\r']),
+        KeyCode::Enter => enter_key_to_bytes(modifiers),
         KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Tab => Some(vec![b'\t']),
         KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
         KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Up => Some(b"\x1b[A".to_vec()),
-        KeyCode::Down => Some(b"\x1b[B".to_vec()),
-        KeyCode::Right => Some(b"\x1b[C".to_vec()),
-        KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        KeyCode::Up => Some(arrow_key_to_bytes(b'A', modifiers)),
+        KeyCode::Down => Some(arrow_key_to_bytes(b'B', modifiers)),
+        KeyCode::Right => Some(arrow_key_to_bytes(b'C', modifiers)),
+        KeyCode::Left => Some(arrow_key_to_bytes(b'D', modifiers)),
         KeyCode::Home => Some(b"\x1b[H".to_vec()),
         KeyCode::End => Some(b"\x1b[F".to_vec()),
         KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
@@ -82,6 +82,46 @@ fn ctrl_char(ch: char) -> Option<u8> {
     }
 }
 
+fn enter_key_to_bytes(modifiers: KeyModifiers) -> Option<Vec<u8>> {
+    let parameter = kitty_modifier_parameter(modifiers);
+    if parameter == 1 {
+        return Some(vec![b'\r']);
+    }
+
+    Some(format!("\x1b[13;{parameter}u").into_bytes())
+}
+
+fn arrow_key_to_bytes(final_byte: u8, modifiers: KeyModifiers) -> Vec<u8> {
+    let parameter = kitty_modifier_parameter(modifiers);
+    if parameter == 1 {
+        return vec![0x1b, b'[', final_byte];
+    }
+    format!("\x1b[1;{parameter}{}", final_byte as char).into_bytes()
+}
+
+fn kitty_modifier_parameter(modifiers: KeyModifiers) -> u8 {
+    let mut parameter = 1;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        parameter += 1;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        parameter += 2;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        parameter += 4;
+    }
+    if modifiers.contains(KeyModifiers::SUPER) {
+        parameter += 8;
+    }
+    if modifiers.contains(KeyModifiers::HYPER) {
+        parameter += 16;
+    }
+    if modifiers.contains(KeyModifiers::META) {
+        parameter += 32;
+    }
+    parameter
+}
+
 fn function_key(number: u8) -> Option<Vec<u8>> {
     let bytes = match number {
         1 => b"\x1bOP".as_slice(),
@@ -118,6 +158,38 @@ mod tests {
         assert_eq!(
             key_event_to_bytes(key(KeyCode::Enter, KeyModifiers::NONE)),
             Some(vec![b'\r'])
+        );
+    }
+
+    #[test]
+    fn preserves_modified_enter() {
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Enter, KeyModifiers::SHIFT)),
+            Some(b"\x1b[13;2u".to_vec())
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Enter, KeyModifiers::SHIFT | KeyModifiers::ALT)),
+            Some(b"\x1b[13;4u".to_vec())
+        );
+    }
+
+    #[test]
+    fn preserves_alt_and_control_arrow_modifiers() {
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Left, KeyModifiers::ALT)),
+            Some(b"\x1b[1;3D".to_vec())
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Right, KeyModifiers::CONTROL)),
+            Some(b"\x1b[1;5C".to_vec())
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Up, KeyModifiers::ALT | KeyModifiers::CONTROL)),
+            Some(b"\x1b[1;7A".to_vec())
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Down, KeyModifiers::NONE)),
+            Some(b"\x1b[B".to_vec())
         );
     }
 

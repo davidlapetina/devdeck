@@ -1,19 +1,30 @@
 use ratatui::{prelude::*, widgets::*};
 
-use crate::app::{App, FileListMode};
+use crate::app::{App, FileListMode, FilesPane};
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
+pub fn render(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let title = match app.file_list_mode {
         FileListMode::Tree => " Files ",
         FileListMode::Marked => " Marked Files ",
     };
+    let title = if app.files_pane == FilesPane::Tree {
+        format!("{title}• focus ")
+    } else {
+        title.to_string()
+    };
+    let border = if app.files_pane == FilesPane::Tree {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(border));
     let inner_height = area.height.saturating_sub(2) as usize;
+    app.set_tree_viewport_height(inner_height);
     let selected = app.selected_index;
-    let offset = selected.saturating_sub(inner_height.saturating_sub(1));
+    let offset = app.tree_visible_offset(inner_height);
 
     let items = app
         .visible_entries

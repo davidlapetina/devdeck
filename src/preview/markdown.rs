@@ -3,7 +3,17 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+pub const MAX_MARKDOWN_RENDER_ROWS: usize = 8_192;
+pub const MAX_MARKDOWN_RENDER_SPANS: usize = 16_384;
+pub const MAX_MARKDOWN_RENDER_CELLS: usize = 1_048_576;
+pub const MAX_MARKDOWN_RENDER_BYTES: usize = 2 * 1024 * 1024;
+const MAX_MARKDOWN_TABLE_CELL_BYTES: usize = 64 * 1024;
+const MAX_MARKDOWN_LINE_BYTES: usize = 64 * 1024;
+const MAX_MARKDOWN_TABLE_COLUMNS: usize = 256;
+const MARKDOWN_TRUNCATION_SENTINEL: &str = "… Markdown preview truncated …";
 
 #[derive(Debug, Clone, Copy)]
 struct TextMode {
@@ -54,6 +64,14 @@ struct MarkdownAnchor {
     line: usize,
 }
 
+#[derive(Debug, Default)]
+struct RenderBudget {
+    rows: usize,
+    spans: usize,
+    cells: usize,
+    bytes: usize,
+}
+
 pub fn render_markdown(content: &str, width: usize) -> Vec<Line<'static>> {
     render_markdown_with_focus(content, width, None).lines
 }
@@ -92,6 +110,8 @@ fn render_markdown_full(content: &str, width: usize, focused_link: Option<usize>
         anchors: Vec::new(),
         table: None,
         width,
+        budget: RenderBudget::default(),
+        truncated: false,
     };
 
     let options = Options::ENABLE_TABLES
@@ -101,8 +121,19 @@ fn render_markdown_full(content: &str, width: usize, focused_link: Option<usize>
 
     for event in Parser::new_ext(content, options) {
         renderer.handle_event(event);
+        if renderer.truncated {
+            break;
+        }
     }
-    renderer.flush_current();
+    if !renderer.truncated {
+        renderer.flush_current();
+    }
+
+    if renderer.truncated {
+        renderer.current.clear();
+        renderer.table = None;
+        renderer.push_truncation_sentinel();
+    }
 
     if renderer.lines.is_empty() {
         renderer.lines.push(Line::from(""));
@@ -166,6 +197,8 @@ struct Renderer {
     anchors: Vec<MarkdownAnchor>,
     table: Option<TableState>,
     width: usize,
+    budget: RenderBudget,
+    truncated: bool,
 }
 
 impl Renderer {
@@ -173,7 +206,17 @@ impl Renderer {
         if self.in_code_block {
             match event {
                 Event::End(Tag::CodeBlock(_)) => self.end_code_block(),
-                Event::Text(text) | Event::Code(text) => self.code_buffer.push_str(&text),
+                Event::Text(text) | Event::Code(text) => {
+                    let remaining =
+                        MAX_MARKDOWN_RENDER_BYTES.saturating_sub(self.code_buffer.len());
+                    if text.len() > remaining {
+                        let boundary = floor_char_boundary(&text, remaining);
+                        self.code_buffer.push_str(&text[..boundary]);
+                        self.truncated = true;
+                    } else {
+                        self.code_buffer.push_str(&text);
+                    }
+                }
                 Event::SoftBreak | Event::HardBreak => self.code_buffer.push('\n'),
                 _ => {}
             }
@@ -199,7 +242,7 @@ impl Renderer {
             Event::SoftBreak | Event::HardBreak => self.flush_current(),
             Event::Rule => {
                 self.flush_current();
-                self.lines.push(Line::from(Span::styled(
+                self.push_output_line(Line::from(Span::styled(
                     "-".repeat(self.width.min(80)),
                     Style::default().fg(Color::DarkGray),
                 )));
@@ -320,6 +363,10 @@ impl Renderer {
             }
             Event::End(Tag::TableCell) => {
                 if let Some(table) = &mut self.table {
+                    if table.current_row.len() >= MAX_MARKDOWN_TABLE_COLUMNS {
+                        self.truncated = true;
+                        return;
+                    }
                     table
                         .current_row
                         .push(table.current_cell.trim().to_string());
@@ -329,6 +376,10 @@ impl Renderer {
             Event::End(Tag::TableHead) | Event::End(Tag::TableRow) => {
                 if let Some(table) = &mut self.table {
                     if !table.current_row.is_empty() {
+                        if table.rows.len() >= MAX_MARKDOWN_RENDER_ROWS.saturating_sub(1) {
+                            self.truncated = true;
+                            return;
+                        }
                         table.rows.push(std::mem::take(&mut table.current_row));
                     }
                 }
@@ -340,7 +391,15 @@ impl Renderer {
             }
             Event::Text(text) | Event::Code(text) => {
                 if let Some(table) = &mut self.table {
-                    table.current_cell.push_str(&text);
+                    let remaining =
+                        MAX_MARKDOWN_TABLE_CELL_BYTES.saturating_sub(table.current_cell.len());
+                    if text.len() > remaining {
+                        let boundary = floor_char_boundary(&text, remaining);
+                        table.current_cell.push_str(&text[..boundary]);
+                        self.truncated = true;
+                    } else {
+                        table.current_cell.push_str(&text);
+                    }
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -426,17 +485,19 @@ impl Renderer {
     }
 
     fn flush_current(&mut self) {
-        if self.current.is_empty() {
+        if self.current.is_empty() || self.truncated {
             return;
         }
 
         let spans = std::mem::take(&mut self.current);
         let start_line = self.lines.len();
-        let (lines, focused_line) = wrap_spans(spans, self.width, self.focused_link);
+        let (lines, focused_line, truncated) =
+            wrap_spans(spans, self.width, self.focused_link, &mut self.budget);
         if self.focused_link_line.is_none() {
             self.focused_link_line = focused_line.map(|line| start_line + line);
         }
         self.lines.extend(lines);
+        self.truncated |= truncated;
     }
 
     fn end_code_block(&mut self) {
@@ -444,16 +505,52 @@ impl Renderer {
         let code = std::mem::take(&mut self.code_buffer);
         let style = Style::default().fg(Color::LightBlue);
         if code.is_empty() {
-            self.lines.push(Line::from(""));
+            self.push_output_line(Line::from(""));
             return;
         }
 
         for line in code.split('\n') {
-            self.lines.push(Line::from(Span::styled(
-                format!("  {}", line.trim_end_matches('\r')),
-                style,
-            )));
+            let mut rendered = String::with_capacity(self.width.min(4096));
+            let mut cells = 0usize;
+            append_bounded_display(&mut rendered, &mut cells, "  ", self.width);
+            append_bounded_display(
+                &mut rendered,
+                &mut cells,
+                line.trim_end_matches('\r'),
+                self.width,
+            );
+            if rendered.len() > MAX_MARKDOWN_LINE_BYTES {
+                let boundary = floor_char_boundary(&rendered, MAX_MARKDOWN_LINE_BYTES);
+                rendered.truncate(boundary);
+                self.truncated = true;
+            }
+            self.push_output_line(Line::from(Span::styled(rendered, style)));
+            if self.truncated {
+                break;
+            }
         }
+    }
+
+    fn push_output_line(&mut self, line: Line<'static>) {
+        if reserve_markdown_line(&mut self.budget, &line) {
+            self.lines.push(line);
+        } else {
+            self.truncated = true;
+        }
+    }
+
+    fn push_truncation_sentinel(&mut self) {
+        if self.lines.last().is_some_and(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content == MARKDOWN_TRUNCATION_SENTINEL)
+        }) {
+            return;
+        }
+        self.lines.push(Line::from(Span::styled(
+            MARKDOWN_TRUNCATION_SENTINEL,
+            Style::default().fg(Color::Yellow),
+        )));
     }
 
     fn render_table(&mut self, table: TableState) {
@@ -469,24 +566,31 @@ impl Renderer {
         let mut widths = vec![0; column_count];
         for row in &table.rows {
             for (index, cell) in row.iter().enumerate() {
-                widths[index] =
-                    widths[index].max(cell.chars().filter_map(UnicodeWidthChar::width).sum());
+                widths[index] = widths[index]
+                    .max(UnicodeWidthStr::width(cell.as_str()))
+                    .min(self.width);
             }
         }
 
         for (row_index, row) in table.rows.iter().enumerate() {
-            let mut line = String::new();
+            let mut line = String::with_capacity(self.width.min(4096));
+            let mut line_cells = 0usize;
             for (column, width) in widths.iter().enumerate().take(column_count) {
                 let cell = row.get(column).map(String::as_str).unwrap_or("");
-                let padding =
-                    width.saturating_sub(cell.chars().filter_map(UnicodeWidthChar::width).sum());
+                let padding = width.saturating_sub(UnicodeWidthStr::width(cell));
                 if column > 0 {
-                    line.push_str(" | ");
+                    append_bounded_display(&mut line, &mut line_cells, " | ", self.width);
                 }
-                line.push_str(cell);
-                line.push_str(&" ".repeat(padding));
+                append_bounded_display(&mut line, &mut line_cells, cell, self.width);
+                let available = self.width.saturating_sub(line_cells);
+                let padding = padding.min(available);
+                line.extend(std::iter::repeat_n(' ', padding));
+                line_cells = line_cells.saturating_add(padding);
+                if line_cells >= self.width {
+                    break;
+                }
             }
-            self.lines.push(Line::from(Span::styled(
+            self.push_output_line(Line::from(Span::styled(
                 line,
                 if row_index == 0 {
                     Style::default().add_modifier(Modifier::BOLD)
@@ -494,14 +598,26 @@ impl Renderer {
                     Style::default()
                 },
             )));
+            if self.truncated {
+                break;
+            }
 
             if row_index == 0 && table.rows.len() > 1 {
-                let rule = widths
-                    .iter()
-                    .map(|width| "-".repeat((*width).max(3)))
-                    .collect::<Vec<_>>()
-                    .join("-+-");
-                self.lines.push(Line::from(Span::styled(
+                let mut rule = String::with_capacity(self.width.min(4096));
+                let mut rule_cells = 0usize;
+                for (column, width) in widths.iter().enumerate() {
+                    if column > 0 {
+                        append_bounded_display(&mut rule, &mut rule_cells, "-+-", self.width);
+                    }
+                    let remaining = self.width.saturating_sub(rule_cells);
+                    let dashes = (*width).max(3).min(remaining);
+                    rule.extend(std::iter::repeat_n('-', dashes));
+                    rule_cells = rule_cells.saturating_add(dashes);
+                    if rule_cells >= self.width {
+                        break;
+                    }
+                }
+                self.push_output_line(Line::from(Span::styled(
                     rule,
                     Style::default().fg(Color::DarkGray),
                 )));
@@ -514,65 +630,169 @@ fn wrap_spans(
     spans: Vec<PendingSpan>,
     width: usize,
     focused_link: Option<usize>,
-) -> (Vec<Line<'static>>, Option<usize>) {
+    budget: &mut RenderBudget,
+) -> (Vec<Line<'static>>, Option<usize>, bool) {
     let mut lines = Vec::new();
     let mut current = Vec::new();
     let mut current_width = 0;
+    let mut current_bytes = 0usize;
     let mut current_focused = false;
     let mut focused_line = None;
+    let mut truncated = false;
 
     let push_line = |lines: &mut Vec<Line<'static>>,
                      current: &mut Vec<Span<'static>>,
                      current_focused: &mut bool,
-                     focused_line: &mut Option<usize>| {
+                     focused_line: &mut Option<usize>,
+                     budget: &mut RenderBudget| {
+        let line = Line::from(std::mem::take(current));
+        if !reserve_markdown_line(budget, &line) {
+            return false;
+        }
         if *current_focused && focused_line.is_none() {
             *focused_line = Some(lines.len());
         }
-        lines.push(Line::from(std::mem::take(current)));
+        lines.push(line);
         *current_focused = false;
+        true
     };
 
-    for span in spans {
+    'spans: for span in spans {
         let style = span.style;
         let link_index = span.link_index;
-        for ch in span.text.chars() {
-            if ch == '\n' {
-                push_line(
+        for grapheme in span.text.graphemes(true) {
+            if grapheme == "\n" || grapheme == "\r\n" {
+                if !push_line(
                     &mut lines,
                     &mut current,
                     &mut current_focused,
                     &mut focused_line,
-                );
+                    budget,
+                ) {
+                    truncated = true;
+                    break 'spans;
+                }
                 current_width = 0;
+                current_bytes = 0;
                 continue;
             }
 
-            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if current_width + char_width > width && !current.is_empty() {
-                push_line(
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if current_width + grapheme_width > width && !current.is_empty() {
+                if !push_line(
                     &mut lines,
                     &mut current,
                     &mut current_focused,
                     &mut focused_line,
-                );
+                    budget,
+                ) {
+                    truncated = true;
+                    break 'spans;
+                }
                 current_width = 0;
+                current_bytes = 0;
+            }
+
+            let new_span = current.last().is_none_or(|last| last.style != style);
+            if budget
+                .bytes
+                .saturating_add(current_bytes)
+                .saturating_add(grapheme.len())
+                .saturating_add(MARKDOWN_TRUNCATION_SENTINEL.len())
+                > MAX_MARKDOWN_RENDER_BYTES
+                || budget
+                    .cells
+                    .saturating_add(current_width)
+                    .saturating_add(grapheme_width)
+                    .saturating_add(UnicodeWidthStr::width(MARKDOWN_TRUNCATION_SENTINEL))
+                    > MAX_MARKDOWN_RENDER_CELLS
+                || budget
+                    .spans
+                    .saturating_add(current.len())
+                    .saturating_add(usize::from(new_span))
+                    .saturating_add(1)
+                    > MAX_MARKDOWN_RENDER_SPANS
+                || current_bytes.saturating_add(grapheme.len()) > MAX_MARKDOWN_LINE_BYTES
+            {
+                truncated = true;
+                break 'spans;
             }
 
             if focused_link.is_some() && link_index == focused_link {
                 current_focused = true;
             }
-            current.push(Span::styled(ch.to_string(), style));
-            current_width += char_width;
+            if let Some(last) = current.last_mut().filter(|last| last.style == style) {
+                last.content.to_mut().push_str(grapheme);
+            } else {
+                current.push(Span::styled(grapheme.to_string(), style));
+            }
+            current_width += grapheme_width;
+            current_bytes = current_bytes.saturating_add(grapheme.len());
         }
     }
 
-    push_line(
-        &mut lines,
-        &mut current,
-        &mut current_focused,
-        &mut focused_line,
-    );
-    (lines, focused_line)
+    if !truncated
+        && !push_line(
+            &mut lines,
+            &mut current,
+            &mut current_focused,
+            &mut focused_line,
+            budget,
+        )
+    {
+        truncated = true;
+    }
+    (lines, focused_line, truncated)
+}
+
+fn reserve_markdown_line(budget: &mut RenderBudget, line: &Line<'_>) -> bool {
+    let spans = line.spans.len();
+    let cells = line.width();
+    let bytes = line
+        .spans
+        .iter()
+        .map(|span| span.content.len())
+        .sum::<usize>();
+    let sentinel_cells = UnicodeWidthStr::width(MARKDOWN_TRUNCATION_SENTINEL);
+    if budget.rows.saturating_add(2) > MAX_MARKDOWN_RENDER_ROWS
+        || budget.spans.saturating_add(spans).saturating_add(1) > MAX_MARKDOWN_RENDER_SPANS
+        || budget
+            .cells
+            .saturating_add(cells)
+            .saturating_add(sentinel_cells)
+            > MAX_MARKDOWN_RENDER_CELLS
+        || budget
+            .bytes
+            .saturating_add(bytes)
+            .saturating_add(MARKDOWN_TRUNCATION_SENTINEL.len())
+            > MAX_MARKDOWN_RENDER_BYTES
+    {
+        return false;
+    }
+    budget.rows += 1;
+    budget.spans += spans;
+    budget.cells += cells;
+    budget.bytes += bytes;
+    true
+}
+
+fn append_bounded_display(output: &mut String, cells: &mut usize, text: &str, max_cells: usize) {
+    for grapheme in text.graphemes(true) {
+        let width = UnicodeWidthStr::width(grapheme);
+        if cells.saturating_add(width) > max_cells {
+            break;
+        }
+        output.push_str(grapheme);
+        *cells = cells.saturating_add(width);
+    }
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn normalize_anchor(anchor: &str) -> String {
@@ -664,5 +884,89 @@ mod tests {
     fn wraps_to_the_requested_width() {
         let lines = render_markdown("long long long long", 8);
         assert!(lines.len() > 1);
+    }
+
+    #[test]
+    fn wrapping_keeps_graphemes_intact_and_coalesces_style_runs() {
+        let style = Style::default().fg(Color::Blue);
+        let spans = vec![PendingSpan {
+            text: "a\u{301}bc👨‍👩‍👧‍👦d".to_string(),
+            style,
+            link_index: Some(3),
+        }];
+
+        let mut budget = RenderBudget::default();
+        let (lines, focused_line, truncated) = wrap_spans(spans, 2, Some(3), &mut budget);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<String>();
+
+        assert_eq!(rendered, "a\u{301}bc👨‍👩‍👧‍👦d");
+        assert_eq!(focused_line, Some(0));
+        assert!(!truncated);
+        assert!(lines.iter().all(|line| line.spans.len() <= 1));
+        assert!(lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .all(|span| span.style == style));
+    }
+
+    #[test]
+    fn near_limit_markdown_wrap_has_one_span_per_uniform_rendered_line() {
+        let bytes = crate::preview::MAX_PREVIEW_SIZE as usize;
+        let lines = render_markdown(&"x".repeat(bytes), 1);
+
+        let rows = lines.len();
+        let spans = lines.iter().map(|line| line.spans.len()).sum::<usize>();
+        let cells = lines.iter().map(Line::width).sum::<usize>();
+        let output_bytes = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.len())
+            .sum::<usize>();
+
+        assert!(rows <= MAX_MARKDOWN_RENDER_ROWS);
+        assert!(spans <= MAX_MARKDOWN_RENDER_SPANS);
+        assert!(cells <= MAX_MARKDOWN_RENDER_CELLS);
+        assert!(output_bytes <= MAX_MARKDOWN_RENDER_BYTES);
+        assert!(lines.last().unwrap().spans[0]
+            .content
+            .contains("Markdown preview truncated"));
+        assert!(lines[..lines.len() - 1]
+            .iter()
+            .all(|line| line.spans.len() == 1));
+    }
+
+    #[test]
+    fn adversarial_table_is_bounded_before_padding_or_cell_copy() {
+        let huge = "界".repeat(MAX_MARKDOWN_TABLE_CELL_BYTES);
+        let mut markdown = format!("| Header |\n| --- |\n| {huge} |\n");
+        for _ in 0..MAX_MARKDOWN_RENDER_ROWS * 2 {
+            markdown.push_str("| x |\n");
+        }
+
+        let lines = render_markdown(&markdown, 80);
+        let spans = lines.iter().map(|line| line.spans.len()).sum::<usize>();
+        let cells = lines.iter().map(Line::width).sum::<usize>();
+        let bytes = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.len())
+            .sum::<usize>();
+
+        assert!(lines.len() <= MAX_MARKDOWN_RENDER_ROWS);
+        assert!(spans <= MAX_MARKDOWN_RENDER_SPANS);
+        assert!(cells <= MAX_MARKDOWN_RENDER_CELLS);
+        assert!(bytes <= MAX_MARKDOWN_RENDER_BYTES);
+        assert!(lines.last().unwrap().spans[0]
+            .content
+            .contains("Markdown preview truncated"));
+        assert!(lines.iter().all(|line| line.width() <= 80));
     }
 }

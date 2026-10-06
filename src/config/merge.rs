@@ -30,6 +30,15 @@ pub fn merge_configs(
         if project.workspace.ignored_directories.is_some() {
             workspace.ignored_directories = project.workspace.ignored_directories;
         }
+        if project.workspace.previous_tab_key.is_some() {
+            workspace.previous_tab_key = project.workspace.previous_tab_key;
+        }
+        if project.workspace.next_tab_key.is_some() {
+            workspace.next_tab_key = project.workspace.next_tab_key;
+        }
+        if project.workspace.mouse_policy.is_some() {
+            workspace.mouse_policy = project.workspace.mouse_policy;
+        }
 
         for raw_profile in project.tabs {
             let profile = expand_profile(raw_profile, repo_root)?;
@@ -189,5 +198,98 @@ ignored_directories = []
         let resolved = merge_configs(Some(global), Some(project), temp.path()).unwrap();
 
         assert_eq!(resolved.workspace.ignored_directories, Some(Vec::new()));
+    }
+
+    #[test]
+    fn project_tab_keys_override_global_values_independently() {
+        let temp = TempDir::new().unwrap();
+        let global = parse_config_toml(
+            r#"
+version = 1
+[workspace]
+previous_tab_key = "Ctrl-Left"
+next_tab_key = "Ctrl-Right"
+"#,
+            "global config",
+        )
+        .unwrap();
+        let project = parse_config_toml(
+            r#"
+version = 1
+[workspace]
+next_tab_key = "Alt-Right"
+"#,
+            ".devdeck.toml",
+        )
+        .unwrap();
+
+        let resolved = merge_configs(Some(global), Some(project), temp.path()).unwrap();
+
+        assert_eq!(
+            resolved.workspace.previous_tab_key.as_deref(),
+            Some("Ctrl-Left")
+        );
+        assert_eq!(
+            resolved.workspace.next_tab_key.as_deref(),
+            Some("Alt-Right")
+        );
+    }
+
+    #[test]
+    fn project_mouse_policy_overrides_global_value() {
+        let temp = TempDir::new().unwrap();
+        let global = parse_config_toml(
+            r#"
+version = 1
+[workspace]
+mouse_policy = "selection"
+"#,
+            "global config",
+        )
+        .unwrap();
+        let project = parse_config_toml(
+            r#"
+version = 1
+[workspace]
+mouse_policy = "navigation"
+"#,
+            ".devdeck.toml",
+        )
+        .unwrap();
+
+        let resolved = merge_configs(Some(global), Some(project), temp.path()).unwrap();
+
+        assert_eq!(
+            resolved.workspace.mouse_policy,
+            Some(crate::config::MousePolicy::Navigation)
+        );
+    }
+
+    #[test]
+    fn rejects_tab_key_collision_created_by_cross_scope_merge() {
+        let temp = TempDir::new().unwrap();
+        let global = parse_config_toml(
+            r#"
+version = 1
+[workspace]
+previous_tab_key = "Ctrl-Left"
+"#,
+            "global config",
+        )
+        .unwrap();
+        let project = parse_config_toml(
+            r#"
+version = 1
+[workspace]
+next_tab_key = "Control-Left"
+"#,
+            ".devdeck.toml",
+        )
+        .unwrap();
+
+        let error = merge_configs(Some(global), Some(project), temp.path()).unwrap_err();
+        let error = format!("{error:#}");
+
+        assert!(error.contains("must be different"));
     }
 }

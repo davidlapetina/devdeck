@@ -2,6 +2,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use std::sync::OnceLock;
 use syntect::{
     easy::HighlightLines,
     highlighting::{FontStyle, Style as SyntectStyle, ThemeSet},
@@ -18,27 +19,32 @@ pub fn highlight(content: &str, language: Option<Language>) -> Vec<Line<'static>
         return text::plain_lines(content);
     };
 
-    let syntax_set = SyntaxSet::load_defaults_newlines();
-    let theme_set = ThemeSet::load_defaults();
-    let Some(theme) = theme_set
+    let resources = syntax_resources();
+    let Some(theme) = resources
+        .themes
         .themes
         .get("base16-ocean.dark")
-        .or_else(|| theme_set.themes.values().next())
+        .or_else(|| resources.themes.themes.values().next())
     else {
         return text::plain_lines(content);
     };
 
-    let syntax = syntax_set
+    let syntax = resources
+        .syntaxes
         .find_syntax_by_name(syntax_name)
-        .or_else(|| syntax_set.find_syntax_by_extension(language.label()))
-        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
+        .or_else(|| {
+            resources
+                .syntaxes
+                .find_syntax_by_extension(language.label())
+        })
+        .unwrap_or_else(|| resources.syntaxes.find_syntax_plain_text());
 
     let mut highlighter = HighlightLines::new(syntax, theme);
     let mut lines = Vec::new();
 
     for line in content.split('\n') {
         let line = line.trim_end_matches('\r');
-        let ranges = match highlighter.highlight_line(line, &syntax_set) {
+        let ranges = match highlighter.highlight_line(line, &resources.syntaxes) {
             Ok(ranges) => ranges,
             Err(_) => return text::plain_lines(content),
         };
@@ -55,6 +61,19 @@ pub fn highlight(content: &str, language: Option<Language>) -> Vec<Line<'static>
     }
 
     lines
+}
+
+struct SyntaxResources {
+    syntaxes: SyntaxSet,
+    themes: ThemeSet,
+}
+
+fn syntax_resources() -> &'static SyntaxResources {
+    static RESOURCES: OnceLock<SyntaxResources> = OnceLock::new();
+    RESOURCES.get_or_init(|| SyntaxResources {
+        syntaxes: SyntaxSet::load_defaults_newlines(),
+        themes: ThemeSet::load_defaults(),
+    })
 }
 
 fn convert_style(style: SyntectStyle) -> Style {

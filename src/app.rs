@@ -11,7 +11,7 @@ use chrono::Local;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::{
-    config::{self, ResolvedConfig, TerminalProfile},
+    config::{self, MousePolicy, ResolvedConfig, TerminalProfile},
     event::{EventSender, FsEventBatch},
     filesystem::tree::{default_ignored_directories, FileTree, VisibleEntry},
     input::keymap::{map_key, KeyAction},
@@ -49,6 +49,7 @@ pub enum InputMode {
     Terminal,
     CommandPrefix,
     TabLauncher,
+    TabSwitcher,
     RenameTab,
     RenamePath,
     FileActions,
@@ -60,6 +61,12 @@ pub enum InputMode {
     AgentPrompt,
     ReminderEditor,
     Reminders,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TabSwitcherState {
+    pub query: String,
+    pub selected: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +89,22 @@ pub enum FileListMode {
     Marked,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FilesPane {
+    #[default]
+    Tree,
+    Preview,
+}
+
+impl FilesPane {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tree => "tree",
+            Self::Preview => "preview",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReminderField {
     Title,
@@ -98,7 +121,13 @@ pub struct ReminderEditorState {
 
 #[derive(Debug, Clone, Copy)]
 struct TabClick {
-    index: usize,
+    id: TabId,
+    at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct TreeClick {
+    path: PathBuf,
     at: Instant,
 }
 
@@ -190,33 +219,45 @@ pub struct App {
     pub marked_paths: HashSet<PathBuf>,
     pub selected_path: Option<PathBuf>,
     pub selected_index: usize,
+    pub tree_scroll_offset: usize,
     pub expanded_directories: HashSet<PathBuf>,
     pub preview: PreviewState,
+    pub(crate) preview_render_cache: crate::ui::preview::PreviewRenderCache,
     pub preview_link_index: Option<usize>,
+    pub files_pane: FilesPane,
+    pub maximized_files_pane: Option<FilesPane>,
+    pub preview_wrap: bool,
+    pub preview_line_numbers: bool,
     pub search: SearchState,
     pub show_hidden: bool,
     pub ignored_directories: Vec<String>,
     pub watch_enabled: bool,
     pub markdown_rendered: bool,
-    pub mouse_capture_enabled: bool,
+    pub mouse_policy: MousePolicy,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
     pub sessions: SessionRegistry,
     pub input_mode: InputMode,
     pub terminal_dimensions: TerminalDimensions,
     pub launcher: TabLauncherState,
+    pub tab_switcher: TabSwitcherState,
     pub rename: RenameState,
     pub prompt: PromptState,
     pub agent_prompt: AgentPromptState,
     pub reminder_editor: ReminderEditorState,
     pub reminders: ReminderStore,
     pub reminder_list_selected: usize,
+    pub help_scroll: usize,
     pub status_message: Option<String>,
     pub should_quit: bool,
     next_tab_id: u64,
     status_set_at: Option<Instant>,
     confirm_tab: Option<usize>,
     last_tab_click: Option<TabClick>,
+    last_tree_click: Option<TreeClick>,
+    tab_mru: Vec<TabId>,
+    previous_tab_key: String,
+    next_tab_key: String,
 }
 
 impl App {
@@ -242,6 +283,7 @@ impl App {
             .map(|path| PreviewState::load(path, false))
             .unwrap_or_default();
 
+        let mouse_policy = config.workspace.mouse_policy.unwrap_or_default();
         let mut next_tab_id = 1;
         let mut tabs = vec![Tab::repository(TabId(next_tab_id))];
         next_tab_id += 1;
@@ -250,6 +292,16 @@ impl App {
             next_tab_id += 1;
         }
 
+        let previous_tab_key = config
+            .workspace
+            .previous_tab_key
+            .clone()
+            .unwrap_or_else(|| "Alt-Left".to_string());
+        let next_tab_key = config
+            .workspace
+            .next_tab_key
+            .clone()
+            .unwrap_or_else(|| "Alt-Right".to_string());
         let active_tab = config
             .workspace
             .default_tab
@@ -265,6 +317,15 @@ impl App {
             ),
         };
 
+        let tab_mru = std::iter::once(tabs[active_tab].id)
+            .chain(
+                tabs.iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != active_tab)
+                    .map(|(_, tab)| tab.id),
+            )
+            .collect();
+
         Ok(Self {
             root_path,
             tree,
@@ -273,33 +334,45 @@ impl App {
             marked_paths: HashSet::new(),
             selected_path,
             selected_index: 0,
+            tree_scroll_offset: 0,
             expanded_directories,
             preview,
+            preview_render_cache: crate::ui::preview::PreviewRenderCache::default(),
             preview_link_index: None,
+            files_pane: FilesPane::Tree,
+            maximized_files_pane: None,
+            preview_wrap: true,
+            preview_line_numbers: true,
             search: SearchState::default(),
             show_hidden,
             ignored_directories,
             watch_enabled,
             markdown_rendered: true,
-            mouse_capture_enabled: false,
+            mouse_policy,
             tabs,
             active_tab,
             sessions: SessionRegistry::new(),
             input_mode,
             terminal_dimensions: TerminalDimensions::default(),
             launcher: TabLauncherState::default(),
+            tab_switcher: TabSwitcherState::default(),
             rename: RenameState::default(),
             prompt: PromptState::default(),
             agent_prompt: AgentPromptState::default(),
             reminder_editor: ReminderEditorState::default(),
             reminders,
             reminder_list_selected: 0,
+            help_scroll: 0,
             status_message: reminder_status.clone(),
             should_quit: false,
             next_tab_id,
             status_set_at: reminder_status.as_ref().map(|_| Instant::now()),
             confirm_tab: None,
             last_tab_click: None,
+            last_tree_click: None,
+            tab_mru,
+            previous_tab_key,
+            next_tab_key,
         })
     }
 
@@ -330,6 +403,44 @@ impl App {
     }
 
     pub fn handle_key(&mut self, event: KeyEvent, event_tx: &EventSender) -> Option<ExternalOpen> {
+        self.clear_mouse_click_tracking();
+        if matches!(self.input_mode, InputMode::Repository | InputMode::Terminal) {
+            let direct_tab_actions = matches!(self.active_content(), Some(TabContent::Repository))
+                || self
+                    .active_tab()
+                    .and_then(Tab::as_terminal)
+                    .is_some_and(|terminal| !matches!(terminal.state, TerminalTabState::Running));
+            if direct_tab_actions {
+                match event {
+                    KeyEvent {
+                        code: KeyCode::Char('t'),
+                        modifiers: KeyModifiers::ALT,
+                        ..
+                    } => {
+                        self.open_tab_switcher();
+                        return None;
+                    }
+                    KeyEvent {
+                        code: KeyCode::Char('l'),
+                        modifiers: KeyModifiers::ALT,
+                        ..
+                    } => {
+                        self.select_mru_tab(event_tx);
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+            if key_event_matches_binding(event, &self.previous_tab_key) {
+                self.select_previous_tab(event_tx);
+                return None;
+            }
+            if key_event_matches_binding(event, &self.next_tab_key) {
+                self.select_next_tab(event_tx);
+                return None;
+            }
+        }
+
         match self.input_mode {
             InputMode::CommandPrefix => {
                 self.handle_prefix_key(event, event_tx);
@@ -337,6 +448,10 @@ impl App {
             }
             InputMode::TabLauncher => {
                 self.handle_launcher_key(event, event_tx);
+                return None;
+            }
+            InputMode::TabSwitcher => {
+                self.handle_tab_switcher_key(event, event_tx);
                 return None;
             }
             InputMode::RenameTab => {
@@ -364,11 +479,25 @@ impl App {
                 return None;
             }
             InputMode::Help => {
-                if matches!(
-                    event.code,
-                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')
-                ) {
-                    self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+                match event.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                        self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.help_scroll = self.help_scroll.saturating_add(1);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.help_scroll = self.help_scroll.saturating_sub(1);
+                    }
+                    KeyCode::Char('d') | KeyCode::PageDown => {
+                        self.help_scroll = self.help_scroll.saturating_add(10);
+                    }
+                    KeyCode::Char('u') | KeyCode::PageUp => {
+                        self.help_scroll = self.help_scroll.saturating_sub(10);
+                    }
+                    KeyCode::Home | KeyCode::Char('g') => self.help_scroll = 0,
+                    KeyCode::End | KeyCode::Char('G') => self.help_scroll = usize::MAX,
+                    _ => {}
                 }
                 return None;
             }
@@ -392,14 +521,14 @@ impl App {
         }
 
         if is_mouse_toggle_key(event) {
-            self.toggle_mouse_capture();
+            self.cycle_mouse_policy();
             return None;
         }
 
         if is_ctrl_b(event) {
             self.input_mode = InputMode::CommandPrefix;
             self.set_status(
-                "COMMAND | 1..9 tab | n/p tab | c new | x stop | r restart | e reload | m mouse | q quit | ? help",
+                "COMMAND | 1..9 tab | n/p tab | t switcher | l last | c new | x stop | r restart | e reload | m mouse policy | q quit | ? help",
             );
             return None;
         }
@@ -437,6 +566,10 @@ impl App {
                     field.push_str(&paste_single_line(&text));
                 }
             }
+            InputMode::TabSwitcher => {
+                self.tab_switcher.query.push_str(&paste_single_line(&text));
+                self.tab_switcher.selected = 0;
+            }
             InputMode::RenameTab | InputMode::RenamePath => {
                 self.rename.value.push_str(&paste_single_line(&text));
             }
@@ -466,47 +599,148 @@ impl App {
         }
     }
 
-    pub fn handle_mouse(&mut self, event: MouseEvent) {
-        let delta = match event.kind {
-            MouseEventKind::ScrollUp => -(MOUSE_SCROLL_LINES as isize),
-            MouseEventKind::ScrollDown => MOUSE_SCROLL_LINES as isize,
-            _ => return,
-        };
+    pub fn effective_mouse_capture(&self) -> bool {
+        match self.mouse_policy {
+            MousePolicy::Auto => self.input_mode == InputMode::Repository && !self.search.active,
+            MousePolicy::Selection => false,
+            MousePolicy::Navigation => true,
+        }
+    }
 
-        match self.input_mode {
-            InputMode::Repository => self.preview.scroll_lines(delta),
-            InputMode::Terminal => self.scroll_active_terminal(delta),
-            InputMode::CommandPrefix
-            | InputMode::TabLauncher
-            | InputMode::RenameTab
-            | InputMode::RenamePath
-            | InputMode::FileActions
-            | InputMode::ConfirmStop
-            | InputMode::ConfirmRestart
-            | InputMode::ConfirmQuit
-            | InputMode::Help
-            | InputMode::PromptOverlay
-            | InputMode::AgentPrompt
-            | InputMode::ReminderEditor
-            | InputMode::Reminders => {}
+    pub fn accepts_mouse_navigation(&self) -> bool {
+        self.effective_mouse_capture()
+            && !self.search.active
+            && matches!(self.input_mode, InputMode::Repository | InputMode::Terminal)
+    }
+
+    pub fn tree_visible_offset(&self, inner_height: usize) -> usize {
+        self.tree_scroll_offset
+            .min(self.visible_entries.len().saturating_sub(inner_height))
+    }
+
+    pub fn set_tree_viewport_height(&mut self, inner_height: usize) {
+        self.ensure_tree_selection_visible(inner_height);
+    }
+
+    pub fn handle_tree_mouse(
+        &mut self,
+        event: MouseEvent,
+        visible_row: Option<usize>,
+        inner_height: usize,
+    ) {
+        if !self.effective_mouse_capture()
+            || self.input_mode != InputMode::Repository
+            || self.search.active
+        {
+            return;
+        }
+        self.files_pane = FilesPane::Tree;
+        self.set_tree_viewport_height(inner_height);
+
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                self.clear_mouse_click_tracking();
+                self.move_selection(-(MOUSE_SCROLL_LINES as isize));
+            }
+            MouseEventKind::ScrollDown => {
+                self.clear_mouse_click_tracking();
+                self.move_selection(MOUSE_SCROLL_LINES as isize);
+            }
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                self.last_tab_click = None;
+                let Some(row) = visible_row else {
+                    self.last_tree_click = None;
+                    return;
+                };
+                let index = self.tree_visible_offset(inner_height).saturating_add(row);
+                if index >= self.visible_entries.len() {
+                    self.last_tree_click = None;
+                    return;
+                }
+
+                let path = self.visible_entries[index].path.clone();
+                let now = Instant::now();
+                let double_click = self.last_tree_click.as_ref().is_some_and(|click| {
+                    click.path == path && now.duration_since(click.at) <= DOUBLE_CLICK_WINDOW
+                });
+                self.select_index(index);
+                if double_click {
+                    self.last_tree_click = None;
+                    if self.selected_entry().is_some_and(|entry| entry.is_dir) {
+                        self.expand_or_enter();
+                    }
+                } else {
+                    self.last_tree_click = Some(TreeClick { path, at: now });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn handle_preview_mouse(&mut self, event: MouseEvent) {
+        if !self.effective_mouse_capture()
+            || self.input_mode != InputMode::Repository
+            || self.search.active
+        {
+            return;
+        }
+        match event.kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                self.clear_mouse_click_tracking();
+                self.files_pane = FilesPane::Preview;
+            }
+            kind => {
+                if let Some(delta) = mouse_scroll_delta(kind) {
+                    self.clear_mouse_click_tracking();
+                    self.files_pane = FilesPane::Preview;
+                    self.preview.scroll_lines(delta);
+                }
+            }
+        }
+    }
+
+    pub fn handle_terminal_mouse(&mut self, event: MouseEvent) {
+        if !self.effective_mouse_capture() || self.input_mode != InputMode::Terminal {
+            return;
+        }
+        if let Some(delta) = mouse_scroll_delta(event.kind) {
+            self.clear_mouse_click_tracking();
+            self.scroll_active_terminal(delta);
         }
     }
 
     pub fn handle_filesystem_event(&mut self, batch: FsEventBatch) {
         let selected_before = self.selected_path.clone();
+        let selected_after_rename = selected_before
+            .as_deref()
+            .map(|path| remap_renamed_path(path, &batch.renames));
+        let preview_scroll_before = self.preview.scroll;
+        let preview_horizontal_before = self.preview.horizontal_scroll;
         if batch.tree_changed {
-            self.reload_tree_preserving_selection();
+            if let Some(remapped) = selected_after_rename.as_ref() {
+                self.selected_path = Some(remapped.clone());
+            }
+            self.reload_tree_preserving_selection_with_preview(false);
         }
 
-        if let Some(selected) = selected_before.as_deref() {
-            let related = batch.paths.iter().any(|path| paths_related(selected, path));
-            if related || batch.tree_changed {
-                if selected.exists() {
-                    let scroll = self.preview.scroll;
-                    self.preview = PreviewState::load_with_scroll(selected, scroll);
+        if let Some(selected) = selected_after_rename.as_deref() {
+            let related = batch.paths.iter().any(|path| {
+                paths_related(selected, path)
+                    || selected_before
+                        .as_deref()
+                        .is_some_and(|before| paths_related(before, path))
+            });
+            if related {
+                if selected.exists() && self.selected_path.as_deref() == Some(selected) {
+                    self.preview = PreviewState::load_with_offsets(
+                        selected,
+                        preview_scroll_before,
+                        preview_horizontal_before,
+                    );
                     self.preview_link_index = None;
                     self.set_status(format!("Refreshed: {}", self.relative_display(selected)));
-                } else {
+                } else if !selected.exists() {
+                    self.reload_selected_preview(false);
                     self.set_status("Selected file was deleted".to_string());
                 }
             }
@@ -529,13 +763,15 @@ impl App {
     }
 
     pub fn handle_tab_click(&mut self, index: usize, event_tx: &EventSender) {
-        if index >= self.tabs.len() {
+        if !self.effective_mouse_capture() || index >= self.tabs.len() {
             return;
         }
 
+        self.last_tree_click = None;
+        let id = self.tabs[index].id;
         let now = Instant::now();
         let double_click = self.last_tab_click.is_some_and(|click| {
-            click.index == index && now.duration_since(click.at) <= DOUBLE_CLICK_WINDOW
+            click.id == id && now.duration_since(click.at) <= DOUBLE_CLICK_WINDOW
         });
 
         self.select_tab(index, event_tx);
@@ -544,8 +780,47 @@ impl App {
             self.last_tab_click = None;
             self.open_rename_tab();
         } else {
-            self.last_tab_click = Some(TabClick { index, at: now });
+            self.last_tab_click = Some(TabClick { id, at: now });
         }
+    }
+
+    pub fn handle_tab_mouse(
+        &mut self,
+        index: Option<usize>,
+        event: MouseEvent,
+        event_tx: &EventSender,
+    ) {
+        if !self.accepts_mouse_navigation() {
+            return;
+        }
+        match event.kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                if let Some(index) = index {
+                    self.handle_tab_click(index, event_tx);
+                } else {
+                    self.clear_mouse_click_tracking();
+                }
+            }
+            MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight
+            | MouseEventKind::Down(_) => self.clear_mouse_click_tracking(),
+            MouseEventKind::Up(_) | MouseEventKind::Drag(_) | MouseEventKind::Moved => {}
+        }
+    }
+
+    pub fn clear_mouse_click_tracking(&mut self) {
+        self.last_tab_click = None;
+        self.last_tree_click = None;
+    }
+
+    pub fn previous_tab_key(&self) -> &str {
+        &self.previous_tab_key
+    }
+
+    pub fn next_tab_key(&self) -> &str {
+        &self.next_tab_key
     }
 
     pub fn tick(&mut self, event_tx: &EventSender) {
@@ -571,7 +846,7 @@ impl App {
             .filter_map(|(index, tab)| {
                 let terminal = tab.as_terminal()?;
                 let due = terminal.pending_restart_at?;
-                (due <= Instant::now()).then_some(index)
+                (!terminal.removed_from_config && due <= Instant::now()).then_some(index)
             })
             .collect::<Vec<_>>();
 
@@ -618,7 +893,7 @@ impl App {
         };
         let should_return_to_files = self.tabs[index].return_to_files_on_exit;
         if let Some(terminal) = self.tabs[index].terminal_mut() {
-            if terminal.profile.restart_on_exit {
+            if terminal.profile.restart_on_exit && !terminal.removed_from_config {
                 let fast_failure = terminal
                     .last_started_at
                     .is_some_and(|started| started.elapsed() < FAST_RESTART_WINDOW);
@@ -768,6 +1043,10 @@ impl App {
             return None;
         }
 
+        if let Some(open) = self.handle_files_pane_key(event) {
+            return open;
+        }
+
         if self.handle_direct_app_key(event, event_tx) {
             return None;
         }
@@ -818,6 +1097,200 @@ impl App {
         }
 
         None
+    }
+
+    fn handle_files_pane_key(&mut self, event: KeyEvent) -> Option<Option<ExternalOpen>> {
+        if matches!(event.code, KeyCode::Char('z')) && event.modifiers == KeyModifiers::NONE {
+            self.maximized_files_pane = if self.maximized_files_pane == Some(self.files_pane) {
+                None
+            } else {
+                Some(self.files_pane)
+            };
+            self.set_status(match self.maximized_files_pane {
+                Some(pane) => format!("Maximized {} pane", pane.label()),
+                None => "Restored split panes".to_string(),
+            });
+            return Some(None);
+        }
+
+        if self.files_pane == FilesPane::Tree {
+            if matches!(event.code, KeyCode::Char('f')) && event.modifiers == KeyModifiers::NONE {
+                self.files_pane = FilesPane::Preview;
+                if self.maximized_files_pane == Some(FilesPane::Tree) {
+                    self.maximized_files_pane = Some(FilesPane::Preview);
+                }
+                self.set_status("Preview focused: j/k scroll, w wrap, h/l horizontal, Esc tree");
+                return Some(None);
+            }
+            return None;
+        }
+
+        match event {
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } => {
+                self.files_pane = FilesPane::Tree;
+                if self.maximized_files_pane == Some(FilesPane::Preview) {
+                    self.maximized_files_pane = None;
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('J'),
+                modifiers: KeyModifiers::SHIFT,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Down,
+                ..
+            } => self.preview.scroll_lines(1),
+            KeyEvent {
+                code: KeyCode::Char('k'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('K'),
+                modifiers: KeyModifiers::SHIFT,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Up, ..
+            } => self.preview.scroll_lines(-1),
+            KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::PageDown,
+                ..
+            } => self.preview.scroll_page_down(),
+            KeyEvent {
+                code: KeyCode::Char('u'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::PageUp,
+                ..
+            } => self.preview.scroll_page_up(),
+            KeyEvent {
+                code: KeyCode::Char('g'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Home,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('0'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.preview.scroll_top(),
+            KeyEvent {
+                code: KeyCode::Char('G'),
+                modifiers: KeyModifiers::SHIFT,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::End, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('$'),
+                modifiers: KeyModifiers::SHIFT,
+                ..
+            } => self.preview.scroll_bottom(),
+            KeyEvent {
+                code: KeyCode::Char('w'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.preview_wrap = !self.preview_wrap;
+                if self.preview_wrap {
+                    self.preview.horizontal_scroll = 0;
+                }
+                self.set_status(if self.preview_wrap {
+                    "Preview wrap enabled"
+                } else {
+                    "Preview wrap disabled; h/l scroll horizontally"
+                });
+            }
+            KeyEvent {
+                code: KeyCode::Char('N'),
+                modifiers: KeyModifiers::SHIFT,
+                ..
+            } => {
+                self.preview_line_numbers = !self.preview_line_numbers;
+                self.set_status(if self.preview_line_numbers {
+                    "Source line numbers enabled"
+                } else {
+                    "Source line numbers disabled"
+                });
+            }
+            KeyEvent {
+                code: KeyCode::Char('h'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Left,
+                ..
+            } => {
+                if !self.preview_wrap_effective() {
+                    self.preview.scroll_columns(-4);
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char('l'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Right,
+                ..
+            } => {
+                if !self.preview_wrap_effective() {
+                    self.preview.scroll_columns(4);
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char(']'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.focus_preview_link(1),
+            KeyEvent {
+                code: KeyCode::Char('['),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.focus_preview_link(-1),
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => {
+                if self.preview_link_index.is_some() {
+                    return Some(self.activate_preview_link());
+                }
+            }
+            _ if is_preview_passthrough_key(event) => return None,
+            _ => {}
+        }
+        Some(None)
+    }
+
+    pub fn preview_wrap_effective(&self) -> bool {
+        self.preview_wrap
+            || !matches!(
+                self.preview.content,
+                PreviewContent::Text { .. } | PreviewContent::Markdown { .. }
+            )
+            || matches!(self.preview.content, PreviewContent::Markdown { .. })
+                && self.markdown_rendered
     }
 
     fn handle_terminal_key(&mut self, event: KeyEvent, event_tx: &EventSender) {
@@ -970,6 +1443,14 @@ impl App {
                 self.select_previous_tab(event_tx);
             }
             KeyEvent {
+                code: KeyCode::Char('t'),
+                ..
+            } => self.open_tab_switcher(),
+            KeyEvent {
+                code: KeyCode::Char('l'),
+                ..
+            } => self.select_mru_tab(event_tx),
+            KeyEvent {
                 code: KeyCode::Char('c'),
                 ..
             } => self.open_tab_launcher(),
@@ -988,12 +1469,13 @@ impl App {
             KeyEvent {
                 code: KeyCode::Char('m'),
                 ..
-            } => self.toggle_mouse_capture(),
+            } => self.cycle_mouse_policy(),
             KeyEvent {
                 code: KeyCode::Char('?'),
                 ..
             } => {
                 self.confirm_tab = None;
+                self.help_scroll = 0;
                 self.input_mode = InputMode::Help;
             }
             KeyEvent {
@@ -1487,6 +1969,22 @@ impl App {
                 true
             }
             KeyEvent {
+                code: KeyCode::Char('t'),
+                modifiers: KeyModifiers::ALT,
+                ..
+            } => {
+                self.open_tab_switcher();
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('l'),
+                modifiers: KeyModifiers::ALT,
+                ..
+            } => {
+                self.select_mru_tab(event_tx);
+                true
+            }
+            KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::NONE,
                 ..
@@ -1499,6 +1997,7 @@ impl App {
                 modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
                 ..
             } => {
+                self.help_scroll = 0;
                 self.input_mode = InputMode::Help;
                 true
             }
@@ -1529,11 +2028,48 @@ impl App {
             self.watch_recent_output_for_background_tab(previous, Instant::now());
         }
         self.active_tab = index;
+        if !matches!(self.tabs[index].content, TabContent::Repository) {
+            self.search.cancel();
+        }
+        self.clear_mouse_click_tracking();
+        self.sync_tab_mru();
         self.tabs[index].activity = ActivityState::None;
         self.input_mode = base_mode_for_tab(&self.tabs[index]);
         self.confirm_tab = None;
         self.start_terminal_tab(index, event_tx);
         self.resize_active_terminal(self.terminal_dimensions);
+    }
+
+    /// Keep the MRU list in lockstep with the current tabs and selection.
+    ///
+    /// Tab IDs are stable while indices can shift when a tab is removed, so
+    /// every structural tab change funnels through this helper. The active tab
+    /// is always first, stale/duplicate IDs are removed, and newly added tabs
+    /// are appended in display order.
+    fn sync_tab_mru(&mut self) {
+        self.last_tab_click = None;
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+            self.tab_mru.clear();
+            return;
+        }
+
+        self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        let mut synced = Vec::with_capacity(self.tabs.len());
+        let active_id = self.tabs[self.active_tab].id;
+        synced.push(active_id);
+        for id in self.tab_mru.iter().copied() {
+            if id != active_id && self.tabs.iter().any(|tab| tab.id == id) && !synced.contains(&id)
+            {
+                synced.push(id);
+            }
+        }
+        for id in self.tabs.iter().map(|tab| tab.id) {
+            if !synced.contains(&id) {
+                synced.push(id);
+            }
+        }
+        self.tab_mru = synced;
     }
 
     fn watch_recent_output_for_background_tab(&mut self, index: usize, now: Instant) {
@@ -1574,6 +2110,114 @@ impl App {
             self.active_tab - 1
         };
         self.select_tab(previous, event_tx);
+    }
+
+    fn select_mru_tab(&mut self, event_tx: &EventSender) {
+        let Some(index) = self
+            .tab_mru
+            .iter()
+            .skip(1)
+            .find_map(|id| self.tabs.iter().position(|tab| tab.id == *id))
+        else {
+            return;
+        };
+        self.select_tab(index, event_tx);
+    }
+
+    fn open_tab_switcher(&mut self) {
+        self.confirm_tab = None;
+        self.tab_switcher = TabSwitcherState::default();
+        self.input_mode = InputMode::TabSwitcher;
+        self.set_status("Switch tab: type to filter, Up/Down select, Enter open, Esc cancel");
+    }
+
+    fn handle_tab_switcher_key(&mut self, event: KeyEvent, event_tx: &EventSender) {
+        match event {
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } => {
+                self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
+                self.set_status("Tab switch cancelled");
+            }
+            KeyEvent {
+                code: KeyCode::Up | KeyCode::BackTab,
+                ..
+            } => {
+                let count = self.tab_switcher_matches().len();
+                if count > 0 {
+                    self.tab_switcher.selected = self
+                        .tab_switcher
+                        .selected
+                        .checked_sub(1)
+                        .unwrap_or(count - 1);
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Down | KeyCode::Tab,
+                ..
+            } => {
+                let count = self.tab_switcher_matches().len();
+                if count > 0 {
+                    self.tab_switcher.selected = (self.tab_switcher.selected + 1) % count;
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            } => {
+                self.tab_switcher.query.pop();
+                self.tab_switcher.selected = 0;
+            }
+            KeyEvent {
+                code: KeyCode::Char('u'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                self.tab_switcher.query.clear();
+                self.tab_switcher.selected = 0;
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => {
+                if let Some(index) = self
+                    .tab_switcher_matches()
+                    .get(self.tab_switcher.selected)
+                    .copied()
+                {
+                    self.select_tab(index, event_tx);
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+                ..
+            } => {
+                self.tab_switcher.query.push(ch);
+                self.tab_switcher.selected = 0;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn tab_switcher_matches(&self) -> Vec<usize> {
+        let query = self.tab_switcher.query.trim().to_ascii_lowercase();
+        let mut matches = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tab)| {
+                let score = fuzzy_match_score(&tab.title.to_ascii_lowercase(), &query)?;
+                let recency = self
+                    .tab_mru
+                    .iter()
+                    .position(|id| *id == tab.id)
+                    .unwrap_or(usize::MAX);
+                Some((index, score, recency))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|(index, score, recency)| (*score, *recency, *index));
+        matches.into_iter().map(|(index, _, _)| index).collect()
     }
 
     fn open_tab_launcher(&mut self) {
@@ -2078,6 +2722,17 @@ impl App {
         let active_title = self.tabs.get(self.active_tab).map(|tab| tab.title.clone());
         match config::load_config(&self.root_path) {
             Ok(config) => {
+                self.mouse_policy = config.workspace.mouse_policy.unwrap_or_default();
+                self.previous_tab_key = config
+                    .workspace
+                    .previous_tab_key
+                    .clone()
+                    .unwrap_or_else(|| "Alt-Left".to_string());
+                self.next_tab_key = config
+                    .workspace
+                    .next_tab_key
+                    .clone()
+                    .unwrap_or_else(|| "Alt-Right".to_string());
                 let ignored_directories = config
                     .workspace
                     .ignored_directories
@@ -2097,6 +2752,7 @@ impl App {
                     }
                     self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
                 }
+                self.sync_tab_mru();
                 let tree_detail = if ignored_directories_changed {
                     ", tree refreshed"
                 } else {
@@ -2127,13 +2783,16 @@ impl App {
                 .position(|tab| !tab.temporary && tab.title == profile.name)
             {
                 if let Some(terminal) = self.tabs[index].terminal_mut() {
-                    if terminal.profile != profile {
+                    let profile_changed = terminal.profile != profile;
+                    if profile_changed {
                         changed += 1;
                         let running = terminal.state.is_running();
                         terminal.profile = profile;
-                        terminal.removed_from_config = false;
                         terminal.requires_restart = running;
                     }
+                    // Removal is represented independently, so an exact re-add clears only that
+                    // state and preserves any restart requirement from an earlier profile change.
+                    terminal.removed_from_config = false;
                 }
             } else {
                 self.tabs
@@ -2158,10 +2817,12 @@ impl App {
                     .is_some_and(|terminal| terminal.state.is_running());
                 if running {
                     if let Some(terminal) = self.tabs[index].terminal_mut() {
-                        terminal.removed_from_config = true;
-                        terminal.requires_restart = true;
+                        if !terminal.removed_from_config {
+                            terminal.removed_from_config = true;
+                            terminal.pending_restart_at = None;
+                            removed += 1;
+                        }
                     }
-                    removed += 1;
                     index += 1;
                 } else {
                     self.tabs.remove(index);
@@ -2175,13 +2836,15 @@ impl App {
             }
         }
 
+        self.sync_tab_mru();
+
         (added, changed, removed)
     }
 
     fn start_terminal_tab(&mut self, index: usize, event_tx: &EventSender) {
         let Some((old_session_id, title, profile)) = self.tabs.get(index).and_then(|tab| {
             let terminal = tab.as_terminal()?;
-            if terminal.state.is_running() {
+            if terminal.state.is_running() || terminal.removed_from_config {
                 return None;
             }
             Some((
@@ -2219,6 +2882,7 @@ impl App {
                     terminal.state = TerminalTabState::Running;
                     terminal.last_started_at = Some(Instant::now());
                     terminal.pending_restart_at = None;
+                    terminal.requires_restart = false;
                 }
             }
             Err(error) => {
@@ -2280,13 +2944,21 @@ impl App {
             self.sessions.remove(session_id);
         }
 
-        if self.tabs[index].temporary {
+        let removed_from_config = self.tabs[index]
+            .as_terminal()
+            .is_some_and(|terminal| terminal.removed_from_config);
+        if self.tabs[index].temporary || removed_from_config {
             self.tabs.remove(index);
             self.active_tab = index
                 .saturating_sub(1)
                 .min(self.tabs.len().saturating_sub(1));
+            self.sync_tab_mru();
             self.input_mode = base_mode_for_tab(&self.tabs[self.active_tab]);
-            self.set_status("Temporary tab closed");
+            self.set_status(if removed_from_config {
+                "Removed configured tab closed"
+            } else {
+                "Temporary tab closed"
+            });
         } else if let Some(terminal) = self.tabs[index].terminal_mut() {
             terminal.session_id = None;
             terminal.pending_restart_at = None;
@@ -2444,6 +3116,24 @@ impl App {
         }
     }
 
+    fn ensure_tree_selection_visible(&mut self, inner_height: usize) {
+        if inner_height == 0 || self.visible_entries.is_empty() {
+            self.tree_scroll_offset = 0;
+            return;
+        }
+        let max_offset = self.visible_entries.len().saturating_sub(inner_height);
+        self.tree_scroll_offset = self.tree_scroll_offset.min(max_offset);
+        if self.selected_index < self.tree_scroll_offset {
+            self.tree_scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.tree_scroll_offset.saturating_add(inner_height) {
+            self.tree_scroll_offset = self
+                .selected_index
+                .saturating_add(1)
+                .saturating_sub(inner_height)
+                .min(max_offset);
+        }
+    }
+
     fn select_path(&mut self, path: &Path, reset_preview: bool) {
         self.expand_ancestors(path);
         self.refresh_visible_entries();
@@ -2553,13 +3243,18 @@ impl App {
         });
     }
 
-    fn toggle_mouse_capture(&mut self) {
-        self.mouse_capture_enabled = !self.mouse_capture_enabled;
-        self.set_status(if self.mouse_capture_enabled {
-            "Mouse mode enabled: wheel scroll active, terminal text selection disabled"
-        } else {
-            "Mouse mode disabled: terminal text selection restored"
-        });
+    fn cycle_mouse_policy(&mut self) {
+        self.clear_mouse_click_tracking();
+        self.mouse_policy = self.mouse_policy.next();
+        let detail = match self.mouse_policy {
+            MousePolicy::Auto => "captured in Files, native selection in terminals",
+            MousePolicy::Selection => "native terminal selection everywhere",
+            MousePolicy::Navigation => "captured everywhere for navigation",
+        };
+        self.set_status(format!(
+            "Mouse policy: {} ({detail})",
+            self.mouse_policy.label()
+        ));
     }
 
     fn toggle_selected_mark(&mut self) {
@@ -2815,7 +3510,7 @@ impl App {
     }
 
     fn preview_render_width(&self) -> usize {
-        self.preview.viewport_width.saturating_sub(2).max(1)
+        self.preview.viewport_width
     }
 
     fn resolve_markdown_link_path(&self, path_part: &str) -> Option<PathBuf> {
@@ -2896,12 +3591,21 @@ impl App {
         } else {
             0
         };
-        self.preview = PreviewState::load_with_scroll(&path, scroll);
+        let horizontal_scroll = if preserve_scroll {
+            self.preview.horizontal_scroll
+        } else {
+            0
+        };
+        self.preview = PreviewState::load_with_offsets(&path, scroll, horizontal_scroll);
         self.preview_link_index = None;
         self.set_status(format!("Reloaded: {}", self.relative_display(&path)));
     }
 
     fn reload_tree_preserving_selection(&mut self) {
+        self.reload_tree_preserving_selection_with_preview(true);
+    }
+
+    fn reload_tree_preserving_selection_with_preview(&mut self, reset_preview: bool) {
         let previous = self
             .selected_path
             .clone()
@@ -2916,7 +3620,7 @@ impl App {
                     .filter(|path| self.tree.contains_path(path))
                     .cloned()
                     .collect();
-                self.select_path(&previous, true);
+                self.select_path(&previous, reset_preview);
                 self.search.update(&self.tree.all_entries());
             }
             Err(error) => self.set_status(format!("Refresh failed: {error}")),
@@ -2937,6 +3641,7 @@ impl App {
     }
 
     fn refresh_visible_entries(&mut self) {
+        self.last_tree_click = None;
         self.marked_paths
             .retain(|path| self.tree.contains_path(path.as_path()));
         self.visible_entries = match self.file_list_mode {
@@ -2950,6 +3655,9 @@ impl App {
             .visible_entries
             .get(self.selected_index)
             .map(|entry| entry.path.clone());
+        self.tree_scroll_offset = self
+            .tree_scroll_offset
+            .min(self.visible_entries.len().saturating_sub(1));
     }
 
     fn marked_visible_entries(&self) -> Vec<VisibleEntry> {
@@ -3056,6 +3764,21 @@ fn paths_related(selected: &Path, changed: &Path) -> bool {
     selected == changed || changed.starts_with(selected) || selected.starts_with(changed)
 }
 
+fn remap_renamed_path(path: &Path, renames: &[(PathBuf, PathBuf)]) -> PathBuf {
+    renames
+        .iter()
+        .fold(path.to_path_buf(), |current, (from, to)| {
+            let Some(suffix) = current.strip_prefix(from).ok() else {
+                return current;
+            };
+            if to.exists() || !from.exists() {
+                to.join(suffix)
+            } else {
+                current
+            }
+        })
+}
+
 fn launches_from_selected_directory(profile: &TerminalProfile) -> bool {
     if profile.cwd.is_some() {
         return false;
@@ -3150,10 +3873,85 @@ fn is_ctrl_g(event: KeyEvent) -> bool {
     )
 }
 
+fn is_preview_passthrough_key(event: KeyEvent) -> bool {
+    match event {
+        // Global tab/application commands remain available while the Preview pane owns focus.
+        KeyEvent {
+            code: KeyCode::Tab | KeyCode::BackTab,
+            ..
+        } => true,
+        KeyEvent {
+            code: KeyCode::Char(ch),
+            modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+            ..
+        } if ('1'..='9').contains(&ch) => true,
+        KeyEvent {
+            code: KeyCode::Char('n' | 'p' | 'c' | '?' | 'q'),
+            modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+            ..
+        } => true,
+        // These actions operate on the selected file or preview rather than moving the tree.
+        KeyEvent {
+            code: KeyCode::Char('.' | '/' | ' ' | 'm' | 'r' | 'e' | 'v' | 'o' | 'y' | 'a'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        }
+        | KeyEvent {
+            code: KeyCode::Char('M' | 'T' | 'R' | 'Y'),
+            modifiers: KeyModifiers::SHIFT,
+            ..
+        }
+        | KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => true,
+        _ => false,
+    }
+}
+
 fn is_mouse_toggle_key(event: KeyEvent) -> bool {
     matches!(event.code, KeyCode::Char('m') | KeyCode::Char('M'))
         && (event.modifiers.contains(KeyModifiers::ALT)
             || event.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+fn key_event_matches_binding(event: KeyEvent, binding: &str) -> bool {
+    let normalized = binding.trim().to_ascii_lowercase();
+    let (modifiers, key) = match normalized.as_str() {
+        "alt-left" => (KeyModifiers::ALT, KeyCode::Left),
+        "alt-right" => (KeyModifiers::ALT, KeyCode::Right),
+        "ctrl-left" | "control-left" => (KeyModifiers::CONTROL, KeyCode::Left),
+        "ctrl-right" | "control-right" => (KeyModifiers::CONTROL, KeyCode::Right),
+        _ => return false,
+    };
+    event.code == key && event.modifiers == modifiers
+}
+
+fn fuzzy_match_score(candidate: &str, query: &str) -> Option<usize> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    if let Some(position) = candidate.find(query) {
+        return Some(position);
+    }
+
+    let mut query_chars = query.chars();
+    let mut wanted = query_chars.next()?;
+    let mut score = candidate.len();
+    let mut previous_match = None;
+    for (index, ch) in candidate.chars().enumerate() {
+        if ch != wanted {
+            continue;
+        }
+        score += previous_match.map_or(index, |previous| index - previous - 1);
+        previous_match = Some(index);
+        match query_chars.next() {
+            Some(next) => wanted = next,
+            None => return Some(score),
+        }
+    }
+    None
 }
 
 fn next_launcher_field(field: LauncherField) -> LauncherField {
@@ -3187,6 +3985,14 @@ fn base_mode_for_tab(tab: &Tab) -> InputMode {
     match tab.content {
         TabContent::Repository => InputMode::Repository,
         TabContent::Terminal(_) => InputMode::Terminal,
+    }
+}
+
+fn mouse_scroll_delta(kind: MouseEventKind) -> Option<isize> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(-(MOUSE_SCROLL_LINES as isize)),
+        MouseEventKind::ScrollDown => Some(MOUSE_SCROLL_LINES as isize),
+        _ => None,
     }
 }
 
@@ -3249,32 +4055,33 @@ mod tests {
     }
 
     #[test]
-    fn mouse_capture_defaults_off_and_toggles_directly() {
+    fn mouse_policy_defaults_to_auto_and_cycles_directly() {
         let temp = TempDir::new().unwrap();
         let mut app = app(&temp);
         let (tx, _rx) = crate::event::channel();
 
-        assert!(!app.mouse_capture_enabled);
+        assert_eq!(app.mouse_policy, MousePolicy::Auto);
+        assert!(app.effective_mouse_capture());
 
         app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT), &tx);
 
-        assert!(app.mouse_capture_enabled);
+        assert_eq!(app.mouse_policy, MousePolicy::Selection);
+        assert!(!app.effective_mouse_capture());
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Mouse mode enabled: wheel scroll active, terminal text selection disabled")
+            Some("Mouse policy: selection (native terminal selection everywhere)")
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT), &tx);
+        assert_eq!(app.mouse_policy, MousePolicy::Navigation);
+        assert!(app.effective_mouse_capture());
 
-        assert!(!app.mouse_capture_enabled);
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some("Mouse mode disabled: terminal text selection restored")
-        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT), &tx);
+        assert_eq!(app.mouse_policy, MousePolicy::Auto);
     }
 
     #[test]
-    fn command_prefix_toggles_mouse_capture() {
+    fn command_prefix_cycles_mouse_policy() {
         let temp = TempDir::new().unwrap();
         let mut app = app(&temp);
         let (tx, _rx) = crate::event::channel();
@@ -3285,8 +4092,595 @@ mod tests {
         );
         app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE), &tx);
 
-        assert!(app.mouse_capture_enabled);
+        assert_eq!(app.mouse_policy, MousePolicy::Selection);
         assert_eq!(app.input_mode, InputMode::Repository);
+    }
+
+    #[test]
+    fn configured_mouse_policy_sets_startup_behavior() {
+        let temp = TempDir::new().unwrap();
+        let config = ResolvedConfig {
+            workspace: WorkspaceConfig {
+                mouse_policy: Some(MousePolicy::Selection),
+                ..WorkspaceConfig::default()
+            },
+            tabs: Vec::new(),
+        };
+
+        let app = App::new(temp.path().to_path_buf(), false, false, config).unwrap();
+
+        assert_eq!(app.mouse_policy, MousePolicy::Selection);
+        assert!(!app.effective_mouse_capture());
+    }
+
+    #[test]
+    fn auto_capture_tracks_repository_and_terminal_transitions() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Shell"),
+            false,
+        ));
+        let (tx, _rx) = crate::event::channel();
+
+        assert!(app.effective_mouse_capture());
+        app.handle_tab_click(1, &tx);
+        assert!(!app.effective_mouse_capture());
+        app.handle_tab_click(0, &tx);
+        assert_eq!(app.active_tab, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT), &tx);
+        assert!(app.effective_mouse_capture());
+
+        app.search.active = true;
+        assert!(!app.effective_mouse_capture());
+        assert!(!app.accepts_mouse_navigation());
+        app.search.active = false;
+
+        app.input_mode = InputMode::Help;
+        assert!(!app.effective_mouse_capture());
+        app.mouse_policy = MousePolicy::Navigation;
+        assert!(app.effective_mouse_capture());
+    }
+
+    #[test]
+    fn tree_click_selects_and_double_click_expands_directory() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join("docs/guide.md"), "guide").unwrap();
+        fs::write(temp.path().join("notes.txt"), "notes").unwrap();
+        let mut app = app(&temp);
+        let docs_index = app
+            .visible_entries
+            .iter()
+            .position(|entry| entry.name == "docs")
+            .unwrap();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        app.handle_tree_mouse(click, Some(docs_index), 20);
+        app.handle_tree_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                ..click
+            },
+            Some(docs_index),
+            20,
+        );
+        assert_eq!(
+            app.selected_path(),
+            Some(temp.path().canonicalize().unwrap().join("docs").as_path())
+        );
+        assert!(!app
+            .expanded_directories
+            .contains(app.selected_path().unwrap()));
+
+        app.handle_tree_mouse(click, Some(docs_index), 20);
+        assert!(app
+            .expanded_directories
+            .contains(&temp.path().canonicalize().unwrap().join("docs")));
+    }
+
+    #[test]
+    fn blank_tree_click_breaks_directory_double_click_sequence() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join("docs/guide.md"), "guide").unwrap();
+        let mut app = app(&temp);
+        let docs_index = app
+            .visible_entries
+            .iter()
+            .position(|entry| entry.name == "docs")
+            .unwrap();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        app.handle_tree_mouse(click, Some(docs_index), 20);
+        app.handle_tree_mouse(click, Some(19), 20);
+        app.handle_tree_mouse(click, Some(docs_index), 20);
+
+        assert!(!app
+            .expanded_directories
+            .contains(&temp.path().canonicalize().unwrap().join("docs")));
+    }
+
+    #[test]
+    fn tree_wheel_breaks_directory_double_click_sequence() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join("docs/guide.md"), "guide").unwrap();
+        let mut app = app(&temp);
+        let docs_index = app
+            .visible_entries
+            .iter()
+            .position(|entry| entry.name == "docs")
+            .unwrap();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            ..click
+        };
+
+        app.handle_tree_mouse(click, Some(docs_index), 20);
+        app.handle_tree_mouse(wheel, None, 20);
+        app.handle_tree_mouse(click, Some(docs_index), 20);
+
+        assert!(!app
+            .expanded_directories
+            .contains(&temp.path().canonicalize().unwrap().join("docs")));
+    }
+
+    #[test]
+    fn double_click_on_scrolled_tree_row_keeps_viewport_and_expands_same_path() {
+        let temp = TempDir::new().unwrap();
+        for index in 0..8 {
+            fs::create_dir(temp.path().join(format!("dir-{index}"))).unwrap();
+        }
+        let mut app = app(&temp);
+        app.select_index(6);
+        app.set_tree_viewport_height(3);
+        let offset = app.tree_scroll_offset;
+        let target = app.visible_entries[offset].path.clone();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        app.handle_tree_mouse(click, Some(0), 3);
+        assert_eq!(app.tree_scroll_offset, offset);
+        assert_eq!(app.selected_path(), Some(target.as_path()));
+
+        app.handle_tree_mouse(click, Some(0), 3);
+        assert_eq!(app.tree_scroll_offset, offset);
+        assert!(app.expanded_directories.contains(&target));
+    }
+
+    #[test]
+    fn keyboard_tree_navigation_scrolls_only_when_selection_leaves_viewport() {
+        let temp = TempDir::new().unwrap();
+        for index in 0..8 {
+            fs::write(temp.path().join(format!("file-{index}.txt")), "x").unwrap();
+        }
+        let mut app = app(&temp);
+        app.select_index(6);
+        app.set_tree_viewport_height(3);
+        assert_eq!(app.tree_scroll_offset, 4);
+
+        app.move_selection(-1);
+        app.set_tree_viewport_height(3);
+        assert_eq!(app.tree_scroll_offset, 4);
+
+        app.move_selection(-2);
+        app.set_tree_viewport_height(3);
+        assert_eq!(app.tree_scroll_offset, 3);
+    }
+
+    #[test]
+    fn synthetic_mouse_events_are_ignored_when_capture_is_disabled() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("file.txt"), "line\n".repeat(40)).unwrap();
+        let mut app = app(&temp);
+        app.mouse_policy = MousePolicy::Selection;
+        app.preview.set_measurements(80, 5, 40, 80);
+        let before_index = app.selected_index;
+        let before_scroll = app.preview.scroll;
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Shell"),
+            false,
+        ));
+        let scroll = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        app.handle_tree_mouse(scroll, None, 5);
+        app.handle_preview_mouse(scroll);
+        let (tx, _rx) = crate::event::channel();
+        app.handle_tab_click(1, &tx);
+
+        assert_eq!(app.selected_index, before_index);
+        assert_eq!(app.preview.scroll, before_scroll);
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn wheel_actions_are_pane_specific_in_files() {
+        let temp = TempDir::new().unwrap();
+        for index in 0..8 {
+            fs::write(
+                temp.path().join(format!("file-{index}.txt")),
+                (0..40)
+                    .map(|line| format!("line {line}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+        }
+        let mut app = app(&temp);
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        let preview_before = app.preview.scroll;
+        app.handle_tree_mouse(scroll_down, None, 20);
+        assert_eq!(app.selected_index, 3);
+        assert_eq!(app.preview.scroll, preview_before);
+
+        let selected_before = app.selected_index;
+        app.preview.set_measurements(80, 10, 40, 80);
+        app.handle_preview_mouse(scroll_down);
+        assert_eq!(app.selected_index, selected_before);
+        assert!(app.preview.scroll > 0);
+    }
+
+    #[test]
+    fn preview_focus_routes_navigation_wrap_horizontal_and_maximize() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("long.rs"), "0123456789abcdef\n".repeat(40)).unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        app.select_path(&root.join("long.rs"), true);
+        app.preview.set_measurements(10, 5, 40, 24);
+        let selected = app.selected_path.clone();
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE), &tx);
+        assert_eq!(app.files_pane, FilesPane::Preview);
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &tx);
+        assert_eq!(app.preview.scroll, 1);
+        assert_eq!(app.selected_path, selected);
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &tx);
+        assert_eq!(app.preview.scroll, 5);
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT), &tx);
+        assert_eq!(app.preview.scroll, 35);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE), &tx);
+        assert!(!app.preview_wrap);
+        app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT), &tx);
+        assert!(!app.preview_line_numbers);
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &tx);
+        assert_eq!(app.preview.horizontal_scroll, 4);
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE), &tx);
+        assert_eq!(app.maximized_files_pane, Some(FilesPane::Preview));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert_eq!(app.files_pane, FilesPane::Tree);
+        assert_eq!(app.maximized_files_pane, None);
+    }
+
+    #[test]
+    fn preview_preferences_persist_but_offsets_reset_for_new_selection() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("a.rs"), "a".repeat(100)).unwrap();
+        fs::write(temp.path().join("b.rs"), "b".repeat(100)).unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        let (tx, _rx) = crate::event::channel();
+        app.select_path(&root.join("a.rs"), true);
+        app.preview.set_measurements(10, 1, 10, 100);
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE), &tx);
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE), &tx);
+        app.preview.scroll_lines(4);
+        app.preview.scroll_columns(8);
+
+        app.select_path(&root.join("b.rs"), true);
+
+        assert!(!app.preview_wrap);
+        assert!(app.preview_line_numbers);
+        assert_eq!(app.preview.scroll, 0);
+        assert_eq!(app.preview.horizontal_scroll, 0);
+    }
+
+    #[test]
+    fn preview_focus_preserves_markdown_link_activation() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("README.md"), "[Web](https://example.com)").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        let (tx, _rx) = crate::event::channel();
+        app.select_path(&root.join("README.md"), true);
+        app.preview.set_measurements(80, 10, 1, 80);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE), &tx);
+        app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE), &tx);
+        let open = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+
+        assert_eq!(
+            open,
+            Some(ExternalOpen::Url("https://example.com".to_string()))
+        );
+    }
+
+    #[test]
+    fn markdown_link_and_anchor_autoscroll_use_border_free_preview_width() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        let width = 12usize;
+
+        let (link_content, link_line, stale_link_line) = (1..80)
+            .find_map(|words| {
+                let content = format!("{}[Docs](docs.md)", "word ".repeat(words));
+                let actual = preview::markdown::focused_link_line(&content, width, 0)?;
+                let stale = preview::markdown::focused_link_line(&content, width - 2, 0)?;
+                (actual != stale).then_some((content, actual, stale))
+            })
+            .expect("fixture should cross a narrow wrapping boundary");
+        app.preview.content = PreviewContent::Markdown {
+            content: link_content.clone(),
+        };
+        let rendered = preview::markdown::render_markdown(&link_content, width).len();
+        app.preview.set_measurements(width, 1, rendered, width);
+
+        app.focus_preview_link(1);
+
+        assert_eq!(app.preview.scroll, link_line);
+        assert_ne!(app.preview.scroll, stale_link_line);
+
+        let (anchor_content, anchor_line, stale_anchor_line) = (1..80)
+            .find_map(|words| {
+                let content = format!("{}\n\n# Target", "word ".repeat(words));
+                let actual = preview::markdown::anchor_line(&content, width, "target")?;
+                let stale = preview::markdown::anchor_line(&content, width - 2, "target")?;
+                (actual != stale).then_some((content, actual, stale))
+            })
+            .expect("fixture should move a heading across a narrow wrapping boundary");
+        app.preview.content = PreviewContent::Markdown {
+            content: anchor_content.clone(),
+        };
+        let rendered = preview::markdown::render_markdown(&anchor_content, width).len();
+        app.preview.set_measurements(width, 1, rendered, width);
+        app.preview.scroll = 0;
+
+        app.scroll_to_markdown_anchor("target");
+
+        assert_eq!(app.preview.scroll, anchor_line);
+        assert_ne!(app.preview.scroll, stale_anchor_line);
+    }
+
+    #[test]
+    fn preview_focus_consumes_tree_navigation_and_activation_keys() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join("docs/guide.md"), "# Guide").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        let docs = root.join("docs");
+        let (tx, _rx) = crate::event::channel();
+        app.select_path(&docs, true);
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE), &tx);
+        let entry_count = app.visible_entries.len();
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            assert_eq!(app.handle_key(key, &tx), None);
+            assert_eq!(app.selected_path(), Some(docs.as_path()));
+            assert_eq!(app.visible_entries.len(), entry_count);
+            assert!(!app.expanded_directories.contains(&docs));
+            assert!(!app.search.active);
+            assert!(!app.is_marked(&docs));
+        }
+        assert_eq!(app.preview.horizontal_scroll, 0);
+    }
+
+    #[test]
+    fn preview_focus_preserves_non_navigation_file_actions() {
+        #[derive(Clone, Copy)]
+        enum Expected {
+            Hidden,
+            Search,
+            Marked,
+            MarkedFilter,
+            Reminders,
+            Refreshed,
+        }
+
+        let cases = [
+            (
+                KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE),
+                Expected::Hidden,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+                Expected::Search,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                Expected::Marked,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('M'), KeyModifiers::SHIFT),
+                Expected::MarkedFilter,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT),
+                Expected::Reminders,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+                Expected::Refreshed,
+            ),
+        ];
+
+        for (key, expected) in cases {
+            let temp = TempDir::new().unwrap();
+            fs::create_dir(temp.path().join("docs")).unwrap();
+            fs::write(temp.path().join("docs/guide.md"), "# Guide").unwrap();
+            let mut app = app(&temp);
+            let root = temp.path().canonicalize().unwrap();
+            let docs = root.join("docs");
+            let (tx, _rx) = crate::event::channel();
+            app.select_path(&docs, true);
+            app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE), &tx);
+            if matches!(expected, Expected::MarkedFilter) {
+                app.toggle_selected_mark();
+            }
+
+            app.handle_key(key, &tx);
+
+            assert_eq!(app.files_pane, FilesPane::Preview, "key {key:?}");
+            match expected {
+                Expected::Hidden => assert!(app.show_hidden),
+                Expected::Search => assert!(app.search.active),
+                Expected::Marked => assert!(app.is_marked(&docs)),
+                Expected::MarkedFilter => assert_eq!(app.file_list_mode, FileListMode::Marked),
+                Expected::Reminders => assert_eq!(app.input_mode, InputMode::Reminders),
+                Expected::Refreshed => assert_eq!(app.selected_path(), Some(docs.as_path())),
+            }
+        }
+    }
+
+    #[test]
+    fn every_mapped_non_navigation_file_action_passes_through_preview_focus() {
+        let cases = [
+            (
+                KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE),
+                KeyAction::ToggleHidden,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                KeyAction::Quit,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+                KeyAction::ToggleMarkdown,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                KeyAction::ToggleMark,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('M'), KeyModifiers::SHIFT),
+                KeyAction::ToggleMarkedFilter,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT),
+                KeyAction::Reminders,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+                KeyAction::Search,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+                KeyAction::RefreshFile,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+                KeyAction::RefreshTree,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                KeyAction::OpenEditor,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+                KeyAction::OpenInDevdeckEditor,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+                KeyAction::OpenOs,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+                KeyAction::CopyRelative,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+                KeyAction::CopyAbsolute,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                KeyAction::FileActions,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                KeyAction::CtrlC,
+            ),
+        ];
+
+        for (key, action) in cases {
+            assert_eq!(map_key(key), Some(action), "key {key:?}");
+            assert!(is_preview_passthrough_key(key), "action {action:?}");
+        }
+    }
+
+    #[test]
+    fn help_overlay_supports_scrolling_and_close_keys() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        let (tx, _rx) = crate::event::channel();
+        app.input_mode = InputMode::Help;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &tx);
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &tx);
+        assert_eq!(app.help_scroll, 11);
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), &tx);
+        assert_eq!(app.help_scroll, 0);
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT), &tx);
+        assert_eq!(app.help_scroll, usize::MAX);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert_eq!(app.input_mode, InputMode::Repository);
+    }
+
+    #[test]
+    fn preview_focus_keeps_global_tab_navigation_available() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Shell"),
+            false,
+        ));
+        let (tx, _rx) = crate::event::channel();
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE), &tx);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE), &tx);
+
+        assert_eq!(app.active_tab, 1);
     }
 
     #[test]
@@ -3307,6 +4701,423 @@ mod tests {
     }
 
     #[test]
+    fn universal_alt_arrow_keys_navigate_tabs() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Missing"),
+            false,
+        ));
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT), &tx);
+        assert_eq!(app.active_tab, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT), &tx);
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn configured_universal_tab_keys_replace_defaults() {
+        let temp = TempDir::new().unwrap();
+        let config = ResolvedConfig {
+            workspace: WorkspaceConfig {
+                previous_tab_key: Some("Ctrl-Left".to_string()),
+                next_tab_key: Some("Ctrl-Right".to_string()),
+                ..WorkspaceConfig::default()
+            },
+            tabs: vec![terminal_profile("Missing")],
+        };
+        let mut app = App::new(temp.path().to_path_buf(), false, false, config).unwrap();
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT), &tx);
+        assert_eq!(app.active_tab, 0);
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL), &tx);
+        assert_eq!(app.active_tab, 1);
+    }
+
+    #[test]
+    fn configured_tab_switch_closes_repository_search_before_entering_terminal() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("needle.txt"), "needle").unwrap();
+        let config = ResolvedConfig {
+            workspace: WorkspaceConfig {
+                previous_tab_key: Some("Ctrl-Left".to_string()),
+                next_tab_key: Some("Ctrl-Right".to_string()),
+                ..WorkspaceConfig::default()
+            },
+            tabs: vec![terminal_profile("Shell")],
+        };
+        let mut app = App::new(temp.path().to_path_buf(), false, false, config).unwrap();
+        let entries = app.tree.all_entries();
+        app.search.open(&entries);
+        app.search.push_str("needle", &entries);
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL), &tx);
+
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.input_mode, InputMode::Terminal);
+        assert!(!app.search.active);
+        assert!(app.search.query.is_empty());
+        assert!(app.search.results.is_empty());
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL), &tx);
+        assert_eq!(app.active_tab, 0);
+        assert_eq!(app.input_mode, InputMode::Repository);
+        assert!(!app.search.active);
+    }
+
+    #[test]
+    fn tab_switcher_fuzzy_filters_and_selects_a_tab() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Shell"),
+            false,
+        ));
+        app.tabs.push(Tab::terminal_tab(
+            TabId(3),
+            terminal_profile("Backend"),
+            false,
+        ));
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE), &tx);
+        for ch in "bkd".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &tx);
+        }
+
+        assert_eq!(app.input_mode, InputMode::TabSwitcher);
+        assert_eq!(app.tab_switcher_matches(), vec![2]);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert_eq!(app.active_tab, 2);
+    }
+
+    #[test]
+    fn files_and_inactive_terminals_expose_direct_switcher_and_mru_bindings() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Shell"),
+            false,
+        ));
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT), &tx);
+        assert_eq!(app.input_mode, InputMode::TabSwitcher);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+
+        app.active_tab = 1;
+        app.input_mode = InputMode::Terminal;
+        app.sync_tab_mru();
+        assert_eq!(app.input_mode, InputMode::Terminal);
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT), &tx);
+        assert_eq!(app.active_tab, 0);
+
+        app.active_tab = 1;
+        app.input_mode = InputMode::Terminal;
+        app.sync_tab_mru();
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT), &tx);
+        assert_eq!(app.input_mode, InputMode::TabSwitcher);
+    }
+
+    #[test]
+    fn running_terminal_keeps_direct_switcher_chord_for_child_process() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Shell"),
+            false,
+        ));
+        app.active_tab = 1;
+        app.input_mode = InputMode::Terminal;
+        app.tabs[1].terminal_mut().unwrap().state = TerminalTabState::Running;
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT), &tx);
+
+        assert_eq!(app.input_mode, InputMode::Terminal);
+        assert_eq!(app.active_tab, 1);
+    }
+
+    #[test]
+    fn mru_command_switches_back_to_the_previous_tab() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Shell"),
+            false,
+        ));
+        let (tx, _rx) = crate::event::channel();
+        app.select_tab(1, &tx);
+
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &tx);
+
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn closing_active_temporary_tab_repairs_mru_before_last_tab_switch() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Scratch A"),
+            true,
+        ));
+        app.tabs.push(Tab::terminal_tab(
+            TabId(3),
+            terminal_profile("Scratch B"),
+            true,
+        ));
+        app.active_tab = 1;
+        app.sync_tab_mru();
+        app.active_tab = 2;
+        app.sync_tab_mru();
+        let (tx, _rx) = crate::event::channel();
+
+        app.perform_stop_or_close(2);
+
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.tab_mru, vec![TabId(2), TabId(1)]);
+        app.select_mru_tab(&tx);
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn config_reconcile_prunes_removed_tabs_and_promotes_adjusted_active_tab() {
+        let temp = TempDir::new().unwrap();
+        let mut app = App::new(
+            temp.path().to_path_buf(),
+            false,
+            false,
+            ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![terminal_profile("One"), terminal_profile("Two")],
+            },
+        )
+        .unwrap();
+        app.active_tab = 2;
+        app.sync_tab_mru();
+
+        let (_, _, removed) = app.reconcile_config(ResolvedConfig {
+            workspace: WorkspaceConfig::default(),
+            tabs: vec![terminal_profile("One")],
+        });
+
+        assert_eq!(removed, 1);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.tab_mru, vec![TabId(2), TabId(1)]);
+        let (tx, _rx) = crate::event::channel();
+        app.select_mru_tab(&tx);
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn running_config_tab_remove_repeat_and_exact_readd_have_stable_state() {
+        let temp = TempDir::new().unwrap();
+        let profile = terminal_profile("Shell");
+        let mut app = App::new(
+            temp.path().to_path_buf(),
+            false,
+            false,
+            ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![profile.clone()],
+            },
+        )
+        .unwrap();
+        app.tabs[1].terminal_mut().unwrap().state = TerminalTabState::Running;
+
+        let empty = || ResolvedConfig {
+            workspace: WorkspaceConfig::default(),
+            tabs: Vec::new(),
+        };
+        assert_eq!(app.reconcile_config(empty()), (0, 0, 1));
+        let terminal = app.tabs[1].as_terminal().unwrap();
+        assert!(terminal.removed_from_config);
+        assert!(!terminal.requires_restart);
+
+        assert_eq!(app.reconcile_config(empty()), (0, 0, 0));
+        assert_eq!(
+            app.reconcile_config(ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![profile],
+            }),
+            (0, 0, 0)
+        );
+        let terminal = app.tabs[1].as_terminal().unwrap();
+        assert!(!terminal.removed_from_config);
+        assert!(!terminal.requires_restart);
+    }
+
+    #[test]
+    fn changed_readd_of_running_removed_tab_still_requires_restart() {
+        let temp = TempDir::new().unwrap();
+        let mut profile = terminal_profile("Shell");
+        let mut app = App::new(
+            temp.path().to_path_buf(),
+            false,
+            false,
+            ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![profile.clone()],
+            },
+        )
+        .unwrap();
+        app.tabs[1].terminal_mut().unwrap().state = TerminalTabState::Running;
+        app.reconcile_config(ResolvedConfig {
+            workspace: WorkspaceConfig::default(),
+            tabs: Vec::new(),
+        });
+
+        profile.args.push("--changed".to_string());
+        assert_eq!(
+            app.reconcile_config(ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![profile],
+            }),
+            (0, 1, 0)
+        );
+        let terminal = app.tabs[1].as_terminal().unwrap();
+        assert!(!terminal.removed_from_config);
+        assert!(terminal.requires_restart);
+    }
+
+    #[test]
+    fn removal_round_trip_preserves_preexisting_restart_requirement() {
+        let temp = TempDir::new().unwrap();
+        let original = terminal_profile("Shell");
+        let mut changed = original.clone();
+        changed.args.push("--changed".to_string());
+        let mut app = App::new(
+            temp.path().to_path_buf(),
+            false,
+            false,
+            ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![original],
+            },
+        )
+        .unwrap();
+        app.tabs[1].terminal_mut().unwrap().state = TerminalTabState::Running;
+
+        app.reconcile_config(ResolvedConfig {
+            workspace: WorkspaceConfig::default(),
+            tabs: vec![changed.clone()],
+        });
+        assert!(app.tabs[1].as_terminal().unwrap().requires_restart);
+        app.reconcile_config(ResolvedConfig {
+            workspace: WorkspaceConfig::default(),
+            tabs: Vec::new(),
+        });
+        app.reconcile_config(ResolvedConfig {
+            workspace: WorkspaceConfig::default(),
+            tabs: vec![changed],
+        });
+
+        let terminal = app.tabs[1].as_terminal().unwrap();
+        assert!(!terminal.removed_from_config);
+        assert!(terminal.requires_restart);
+    }
+
+    #[test]
+    fn removed_configured_tab_never_auto_restarts_and_can_be_closed() {
+        let temp = TempDir::new().unwrap();
+        let mut profile = terminal_profile("Worker");
+        profile.restart_on_exit = true;
+        let mut app = App::new(
+            temp.path().to_path_buf(),
+            false,
+            false,
+            ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![profile],
+            },
+        )
+        .unwrap();
+        let session_id = SessionId(42);
+        let terminal = app.tabs[1].terminal_mut().unwrap();
+        terminal.session_id = Some(session_id);
+        terminal.state = TerminalTabState::Running;
+        app.reconcile_config(ResolvedConfig {
+            workspace: WorkspaceConfig::default(),
+            tabs: Vec::new(),
+        });
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_terminal_exit(session_id, Some(0), &tx);
+        assert!(app.tabs[1]
+            .as_terminal()
+            .unwrap()
+            .pending_restart_at
+            .is_none());
+
+        app.active_tab = 1;
+        app.input_mode = InputMode::Terminal;
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE), &tx);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn successful_auto_restart_uses_reconciled_profile_and_clears_restart_flag() {
+        let temp = TempDir::new().unwrap();
+        let mut original = terminal_profile("Worker");
+        original.restart_on_exit = true;
+        let mut app = App::new(
+            temp.path().to_path_buf(),
+            false,
+            false,
+            ResolvedConfig {
+                workspace: WorkspaceConfig::default(),
+                tabs: vec![original.clone()],
+            },
+        )
+        .unwrap();
+        let session_id = SessionId(42);
+        let terminal = app.tabs[1].terminal_mut().unwrap();
+        terminal.session_id = Some(session_id);
+        terminal.state = TerminalTabState::Running;
+        terminal.last_started_at = Some(Instant::now() - FAST_RESTART_WINDOW);
+
+        let mut changed = original;
+        changed.command = "sh".to_string();
+        changed.args = vec!["-c".to_string(), "sleep 1".to_string()];
+        app.reconcile_config(ResolvedConfig {
+            workspace: WorkspaceConfig::default(),
+            tabs: vec![changed],
+        });
+        assert!(app.tabs[1].as_terminal().unwrap().requires_restart);
+        let (tx, _rx) = crate::event::channel();
+        app.handle_terminal_exit(session_id, Some(0), &tx);
+        app.tabs[1].terminal_mut().unwrap().pending_restart_at = Some(Instant::now());
+
+        app.tick(&tx);
+
+        let terminal = app.tabs[1].as_terminal().unwrap();
+        assert!(matches!(terminal.state, TerminalTabState::Running));
+        assert!(!terminal.requires_restart);
+        assert_eq!(terminal.profile.args, ["-c", "sleep 1"]);
+        app.stop_all_sessions();
+    }
+
+    #[test]
     fn double_tab_click_opens_rename_for_temporary_tab() {
         let temp = TempDir::new().unwrap();
         let mut app = app(&temp);
@@ -3316,13 +5127,94 @@ mod tests {
             true,
         ));
         let (tx, _rx) = crate::event::channel();
+        app.mouse_policy = MousePolicy::Navigation;
 
-        app.handle_tab_click(1, &tx);
-        app.handle_tab_click(1, &tx);
+        app.handle_tab_mouse(
+            Some(1),
+            MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 2,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            &tx,
+        );
+        app.handle_tab_mouse(
+            None,
+            MouseEvent {
+                kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                column: 2,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            &tx,
+        );
+        app.handle_tab_mouse(
+            Some(1),
+            MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 2,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            &tx,
+        );
 
         assert_eq!(app.active_tab, 1);
         assert_eq!(app.input_mode, InputMode::RenameTab);
         assert_eq!(app.rename.value, "Scratch");
+    }
+
+    #[test]
+    fn terminal_wheel_breaks_tab_double_click_sequence() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Scratch"),
+            true,
+        ));
+        let (tx, _rx) = crate::event::channel();
+        app.mouse_policy = MousePolicy::Navigation;
+
+        app.handle_tab_click(1, &tx);
+        app.handle_terminal_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 2,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_tab_click(1, &tx);
+
+        assert_eq!(app.input_mode, InputMode::Terminal);
+    }
+
+    #[test]
+    fn tab_double_click_follows_stable_id_across_index_changes() {
+        let temp = TempDir::new().unwrap();
+        let mut app = app(&temp);
+        app.mouse_policy = MousePolicy::Navigation;
+        app.tabs.push(Tab::terminal_tab(
+            TabId(2),
+            terminal_profile("Scratch A"),
+            true,
+        ));
+        app.tabs.push(Tab::terminal_tab(
+            TabId(3),
+            terminal_profile("Scratch B"),
+            true,
+        ));
+        let (tx, _rx) = crate::event::channel();
+
+        app.handle_tab_click(1, &tx);
+        app.tabs.insert(
+            1,
+            Tab::terminal_tab(TabId(4), terminal_profile("Inserted"), true),
+        );
+        app.handle_tab_click(1, &tx);
+
+        assert_eq!(app.tabs[app.active_tab].id, TabId(4));
+        assert_eq!(app.input_mode, InputMode::Terminal);
     }
 
     #[test]
@@ -3398,7 +5290,7 @@ ignored_directories = ["cache"]
         let (tx, _rx) = crate::event::channel();
 
         app.select_path(&root.join("README.md"), true);
-        app.preview.set_measurements(80, 10, 1);
+        app.preview.set_measurements(80, 10, 1, 80);
         app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE), &tx);
         let open = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
 
@@ -3418,7 +5310,7 @@ ignored_directories = ["cache"]
         let (tx, _rx) = crate::event::channel();
 
         app.select_path(&root.join("README.md"), true);
-        app.preview.set_measurements(80, 10, 1);
+        app.preview.set_measurements(80, 10, 1, 80);
         app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE), &tx);
         let open = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
 
@@ -3444,6 +5336,105 @@ ignored_directories = ["cache"]
         app.reload_tree_preserving_selection();
 
         assert_eq!(app.selected_path(), Some(selected.as_path()));
+    }
+
+    #[test]
+    fn unrelated_tree_watcher_event_preserves_both_preview_offsets() {
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("selected.txt"),
+            "a very long line that can scroll horizontally\n".repeat(100),
+        )
+        .unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        let selected = root.join("selected.txt");
+        app.select_path(&selected, true);
+        app.preview.scroll = 37;
+        app.preview.horizontal_scroll = 19;
+        let preview_generation = app.preview.generation();
+
+        fs::write(temp.path().join("unrelated.txt"), "new").unwrap();
+        app.handle_filesystem_event(FsEventBatch {
+            paths: vec![root.join("unrelated.txt")],
+            tree_changed: true,
+            renames: Vec::new(),
+        });
+
+        assert_eq!(app.selected_path(), Some(selected.as_path()));
+        assert_eq!(app.preview.scroll, 37);
+        assert_eq!(app.preview.horizontal_scroll, 19);
+        assert_eq!(app.preview.generation(), preview_generation);
+    }
+
+    #[test]
+    fn watcher_directory_rename_remaps_selected_descendant_and_offsets() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("before")).unwrap();
+        fs::write(
+            temp.path().join("before/selected.txt"),
+            "long preview line\n".repeat(100),
+        )
+        .unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        let before = root.join("before");
+        let after = root.join("after");
+        app.select_path(&before.join("selected.txt"), true);
+        app.preview.scroll = 23;
+        app.preview.horizontal_scroll = 7;
+        fs::rename(&before, &after).unwrap();
+
+        app.handle_filesystem_event(FsEventBatch {
+            paths: vec![before.clone(), after.clone()],
+            tree_changed: true,
+            renames: vec![(before, after.clone())],
+        });
+
+        assert_eq!(
+            app.selected_path(),
+            Some(after.join("selected.txt").as_path())
+        );
+        assert_eq!(app.preview.scroll, 23);
+        assert_eq!(app.preview.horizontal_scroll, 7);
+    }
+
+    #[test]
+    fn invalid_rename_hint_keeps_existing_selected_path() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("selected.txt"), "selected").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        let selected = root.join("selected.txt");
+        app.select_path(&selected, true);
+
+        app.handle_filesystem_event(FsEventBatch {
+            paths: vec![selected.clone()],
+            tree_changed: true,
+            renames: vec![(selected.clone(), root.join("missing.txt"))],
+        });
+
+        assert_eq!(app.selected_path(), Some(selected.as_path()));
+    }
+
+    #[test]
+    fn watcher_remove_without_rename_metadata_falls_back_to_existing_ancestor() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("docs")).unwrap();
+        fs::write(temp.path().join("docs/selected.txt"), "selected").unwrap();
+        let mut app = app(&temp);
+        let root = temp.path().canonicalize().unwrap();
+        let selected = root.join("docs/selected.txt");
+        app.select_path(&selected, true);
+        fs::remove_file(&selected).unwrap();
+
+        app.handle_filesystem_event(FsEventBatch {
+            paths: vec![selected],
+            tree_changed: true,
+            renames: Vec::new(),
+        });
+
+        assert_eq!(app.selected_path(), Some(root.join("docs").as_path()));
     }
 
     #[test]

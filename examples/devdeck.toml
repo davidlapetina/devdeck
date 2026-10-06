@@ -23,6 +23,13 @@ version = 1
 default_tab = "Files"
 # Directory names omitted from the file tree. Set to [] to disable this filter.
 ignored_directories = [".git", "target", "node_modules", ".dart_tool", "dist", "coverage", ".idea"]
+# Supported values: Alt-Left, Alt-Right, Ctrl-Left, and Ctrl-Right.
+# Previous and next must use different bindings.
+previous_tab_key = "Alt-Left"
+next_tab_key = "Alt-Right"
+# auto captures in Files but preserves native selection in terminal tabs.
+# Other values: selection (never capture), navigation (always capture).
+mouse_policy = "auto"
 
 [[tabs]]
 name = "Claude"

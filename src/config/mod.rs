@@ -5,4 +5,4 @@ pub mod model;
 pub mod validate;
 
 pub use load::load_config;
-pub use model::{ResolvedConfig, TerminalProfile, WorkspaceConfig};
+pub use model::{MousePolicy, ResolvedConfig, TerminalProfile, WorkspaceConfig};

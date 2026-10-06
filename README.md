@@ -38,6 +38,17 @@ Claude Code, Codex, shells, Git tools, and editors are all just configured comma
 
 ## Release Notes
 
+### 0.21.0
+
+- Added reliable tab navigation with configurable universal previous/next shortcuts, MRU switching, a searchable tab switcher, and an overflow-safe tab strip.
+- Added automatic, selection-first, and navigation mouse policies so Files can use mouse navigation while terminal tabs retain native text selection.
+- Added pane-aware file-tree selection, directory expansion, preview scrolling, and stable mouse double-click handling.
+- Added keyboard-focused and maximized file previews with wrap control, horizontal scrolling, source line numbers, and visible-range progress.
+- Improved large-file and Unicode preview navigation, Markdown link and anchor handling, filesystem rename tracking, and preview-position preservation.
+- Added cached syntax highlighting, Markdown rendering, and bounded deep-scroll indexing for responsive previews.
+- Added explicit safety limits for Markdown rendering, image decoding and terminal rendering, directory previews, filesystem watcher queues, and preview file reads.
+- Improved terminal lifecycle cleanup, modified-key forwarding, configuration reload behavior, contextual help, and status-line discoverability.
+
 ### 0.20.2
 
 - Added portable image previews for common image formats using terminal truecolor block rendering.
@@ -128,6 +139,12 @@ version = 1
 default_tab = "Files"
 # Directory names omitted from the file tree. Set to [] to disable this filter.
 ignored_directories = [".git", "target", "node_modules", ".dart_tool", "dist", "coverage", ".idea"]
+# Universal tab navigation. Supported values: Alt-Left, Alt-Right, Ctrl-Left,
+# and Ctrl-Right. Previous and next must use different bindings.
+previous_tab_key = "Alt-Left"
+next_tab_key = "Alt-Right"
+# auto, selection, or navigation
+mouse_policy = "auto"
 
 [[tabs]]
 name = "Claude"
@@ -175,6 +192,7 @@ Expansion rules:
 - `~` and environment variables are expanded in `command`, `args`, `cwd`, and environment values.
 - Relative `cwd` values resolve against the repository root.
 - `workspace.ignored_directories` matches directory names case-insensitively. Project config replaces the global list when set.
+- `workspace.previous_tab_key` and `workspace.next_tab_key` configure universal tab navigation; project values override global values independently, and the resolved bindings must be different.
 - Claude and Codex profiles without an explicit `cwd` start in the current file-browser folder. If a file is selected, they start in that file's parent directory. Set `cwd` to pin them to a fixed directory.
 - Commands launch as executable plus argument vector, not through an implicit shell.
 - If a configured command is missing, its tab shows `Executable not found: <command>` and DevDeck keeps running.
@@ -200,10 +218,18 @@ m              Toggle rendered/raw Markdown
 Ctrl-d         Preview page down
 Ctrl-u         Preview page up
 J / K          Preview line down/up
-Alt-m          Toggle mouse-wheel mode
-Mouse wheel    Preview line scroll when mouse-wheel mode is enabled
-Mouse click    Select tab when mouse-wheel mode is enabled
-Double click   Rename selected temporary tab when mouse-wheel mode is enabled
+f              Focus the preview pane
+Esc            Return preview focus to the file tree
+z              Maximize/restore the focused Files pane
+w              Toggle wrapping while the preview is focused
+h/l or arrows  Scroll horizontally when preview wrapping is off
+N              Toggle source-code line numbers while the preview is focused
+j/k or arrows  Scroll by line while the preview is focused
+g/G            Preview top/bottom while the preview is focused
+Alt-m          Cycle mouse policy: auto / selection / navigation
+Mouse wheel    Move the file tree or scroll the pane under the pointer
+Mouse click    Select a tree row or tab when capture is active
+Double click   Expand/enter a folder, or rename a temporary tab
 0 / $          Preview top/bottom
 ] / [          Next/previous Markdown preview link
 Space          Mark/unmark selected file or folder for this session
@@ -216,14 +242,27 @@ v              Open selected file in a temporary editor tab
 r / R          Reload file/tree
 1..9           Select tab by position
 Tab / BackTab  Next/previous tab
+Alt-Left/Right Previous/next tab (configurable with previous_tab_key/next_tab_key)
+Alt-t          Search and switch tabs
+Alt-l          Switch to the most recently used tab
 c              Create temporary command tab from a known command, shell, or custom command
 ?              Help overlay
 q              Quit with confirmation
 ```
 
+The focused Files pane has a cyan border. Clicking or scrolling a pane focuses it. The preview
+title shows the visible rendered-line range, total rendered lines, and scroll percentage. Source
+files show line numbers by default; `N` toggles them for the session, and their number gutter stays
+fixed during horizontal scrolling. Wrapping is also session-wide and stays as selected when moving
+between files, while each newly selected file starts at the top-left. Both wrapped and unwrapped
+previews use full-range windowing, so even content with more than 65,535 rendered rows can reach its
+true tail and report 100%. Rendered Markdown, directory summaries, and image previews keep their
+fitted/wrapped presentation. In the Help overlay, use `j/k`, PageUp/PageDown, or `g/G` to scroll;
+the controls remain visible on small terminals.
+
 When a terminal tab is running, normal keyboard input goes directly to the child process. Use the command prefix for DevDeck commands that would otherwise be typed into Claude, Codex, a shell, Vim, Less, or another terminal program.
 
-Native terminal text selection is available by default. Use `Alt-m` or `Ctrl-b m` to toggle mouse-wheel mode; while enabled, the mouse wheel scrolls file previews and terminal scrollback, tab clicks change views, and a double click on a temporary tab opens rename. Mouse events are captured by DevDeck instead of the terminal while mouse-wheel mode is enabled. In full-screen terminal apps that use the alternate screen, the wheel sends PageUp/PageDown to the child process.
+The default `auto` mouse policy captures the mouse in Files, where clicks select tree rows, double-clicking a directory expands or enters it, the wheel moves the tree or scrolls the preview under the pointer, and tab clicks change views. Terminal tabs release capture so native text selection works. Use `Alt-m` or `Ctrl-b m` to cycle to `selection` (never capture) or `navigation` (capture everywhere, including terminal scrollback). In full-screen terminal apps that use the alternate screen, navigation-mode wheel events send PageUp/PageDown to the child process. Set `workspace.mouse_policy` to `"auto"`, `"selection"`, or `"navigation"` to choose the startup behavior.
 
 Command prefix:
 
@@ -231,12 +270,14 @@ Command prefix:
 Ctrl-b 1..9     Select tab by position
 Ctrl-b n        Next tab
 Ctrl-b p        Previous tab
+Ctrl-b t        Search and switch tabs
+Ctrl-b l        Switch to the most recently used tab
 Ctrl-b f        Select Files tab
 Ctrl-b c        Create temporary command tab from a known command, shell, or custom command
 Ctrl-b x        Stop or close current terminal tab
 Ctrl-b r        Restart current terminal tab
 Ctrl-b e        Reload configuration
-Ctrl-b m        Toggle mouse-wheel mode
+Ctrl-b m        Cycle mouse policy: auto / selection / navigation
 Ctrl-b q        Quit with confirmation
 Ctrl-b ?        Help overlay
 Ctrl-b ,        Rename temporary tab
@@ -250,6 +291,8 @@ Enter / r       Start or restart an exited/failed terminal tab
 x               Close a temporary tab or reset a configured tab
 1..9            Select tab by position
 Tab / BackTab   Next/previous tab
+Alt-t           Search and switch tabs
+Alt-l           Switch to the most recently used tab
 ?               Help overlay
 q               Quit with confirmation
 ```
